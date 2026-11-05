@@ -22,7 +22,8 @@ def inline_script(page):
 
 def test_template_placeholders_are_the_ones_main_substitutes():
     assert set(re.findall(r"__[A-Z_]+__", sg.HTML)) == {
-        "__TITLE__", "__TITLE_JSON__", "__RIVER__", "__GAGES__", "__RETIRED__", "__GENERATED__"}
+        "__TITLE__", "__TITLE_JSON__", "__RIVER__", "__GAGES__", "__RETIRED__", "__AS_OF__",
+        "__GENERATED__"}
 
 
 def test_leaflet_is_pinned_with_integrity_hashes():
@@ -41,9 +42,24 @@ def test_the_retired_layer_is_wired_into_the_page(make_page):
     assert "const RETIRED = [{" in page
 
 
+def test_the_cresting_rule_is_in_the_template_with_its_documented_thresholds():
+    consts = dict(re.findall(r"const (STEADY_BAND|CREST_MIN_AGE_H|CREST_MAX_AGE_H|CREST_MIN_RANGE_POS) = ([\d.]+);",
+                             sg.HTML))
+    assert consts == {"STEADY_BAND": "0.02", "CREST_MIN_AGE_H": "0.25", "CREST_MAX_AGE_H": "6",
+                      "CREST_MIN_RANGE_POS": "95"}
+
+
+def test_the_legend_explains_the_crest_glyph_only_when_a_gage_has_it():
+    assert "if (GAGES.some(isCresting)) h += crestLegendLine();" in sg.HTML
+
+
+def test_the_marker_uses_the_shared_glyph_builder():
+    assert "glyph = glyphFor(g)" in sg.HTML
+
+
 def test_the_diamond_modes_and_trend_glyphs_are_in_the_page(make_page):
     page = make_page([gage()])
-    for label in ("Position in 7-day range", "Trend (last 6 h)", "Percentile of past year"):
+    for label in ("Position in 7-day range", "Trend (last 6 h)", "Percentile for this date (all years)"):
         assert label in page
     assert page.count('name="mode"') == 1  # the radio group is built from MODES in JavaScript
 
@@ -78,6 +94,7 @@ def test_page_logic(tmp_path):
     """Run the page's binning, coloring and formatting code under node, with assertions."""
     template = sg.HTML
     prelude = "\n".join([
+        "let AS_OF = null;",  # set by the page from --as-of; tests change it
         between(template, "const esc =", "const map ="),  # esc, tables, bins, color
         between(template, "function spark(g)", "function icon(g)"),  # sparklines, helpers, popup
         between(template, "function retiredPopup", "if (RETIRED.length) {"),  # retired popup

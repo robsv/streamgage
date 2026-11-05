@@ -60,7 +60,7 @@ def make_page(monkeypatch, tmp_path):
     def render(gages, title="Peace River", lines=(), retired=(), extra_args=()):
         out = tmp_path / "page.html"
         monkeypatch.setattr(sg, "resolve_anchor", lambda *a, **k: "01234567")
-        monkeypatch.setattr(sg, "build_gages", lambda anchor, km, draw=False: (list(lines), gages, list(retired)))
+        monkeypatch.setattr(sg, "build_gages", lambda anchor, km, draw=False, as_of=None: (list(lines), gages, list(retired)))
         monkeypatch.setattr("sys.argv", ["streamgage.py", title, "--out", str(out), *extra_args])
         sg.main()
         return out.read_text(encoding="utf-8")
@@ -68,9 +68,13 @@ def make_page(monkeypatch, tmp_path):
 
 
 def gage(site="02297345", name="Peace River At Platt FL", **overrides):
-    """A gage dict shaped like build_gages() output (a diamond with a 100th percentile)."""
+    """A gage dict shaped like build_gages() output: a diamond at the 100th percentile of the past
+    year and the 94th for this date over all years."""
     base = {"site": site, "name": name, "lat": 27.08, "lon": -82.0, "stage": 2.89,
             "time": "2026-11-04T20:00:00.000-05:00", "method": "percentile", "pct": 100.0,
+            "longterm": {"pct": 94.0, "status": "within", "years": 53, "first": 1973, "last": 2026,
+                         "month": 11, "day": 4, "median": 2.27, "high": 2.9, "high_year": 2006,
+                         "low": 0.4, "low_year": 2001},
             "recent": {"low": -0.77, "high": 2.89, "peak": 2.89, "peak_time": 1793840400000,
                        "range_pos": 100.0, "rate": 0.008277, "delta24": 1.48,
                        "series": [[1793836800000, 2.5], [1793840400000, 2.89]]}}

@@ -195,10 +195,11 @@ def river(monkeypatch):
     """Two reporting gages and four that are not: retired, offline, field visits, no data."""
     monkeypatch.setattr(sg, "fetch_river", lambda anchor, km: ([], SITES))
     when = datetime.now(timezone.utc).isoformat()
-    monkeypatch.setattr(sg, "fetch_current", lambda ids: {"A0000001": (2.0, when), "B0000002": (3.0, when)})
-    monkeypatch.setattr(sg, "fetch_recent", lambda site: [])
-    monkeypatch.setattr(sg, "fetch_history", lambda site: [])
+    monkeypatch.setattr(sg, "fetch_current", lambda ids, as_of=None: {"A0000001": (2.0, when), "B0000002": (3.0, when)})
+    monkeypatch.setattr(sg, "fetch_recent", lambda site, as_of=None: [])
+    monkeypatch.setattr(sg, "fetch_history", lambda site, as_of=None: [])
     monkeypatch.setattr(sg, "fetch_nws", lambda *a: None)
+    monkeypatch.setattr(sg, "fetch_daily_stats", lambda dates: {})
     monkeypatch.setattr(sg, "get_json", lambda url, **p: {"gauges": []})
     asked = []
     recent = (datetime.now(timezone.utc) - timedelta(days=20)).date().isoformat()
@@ -274,7 +275,7 @@ class TestMainWithRetired:
         seen = {}
         monkeypatch.setattr(sg, "resolve_anchor", lambda *a, **k: "01234567")
         monkeypatch.setattr(sg, "build_gages",
-                            lambda anchor, km, draw=False: seen.update(draw=draw) or ([], [gage()], []))
+                            lambda anchor, km, draw=False, as_of=None: seen.update(draw=draw) or ([], [gage()], []))
         for args, expected in (([], False), (["--retired"], True)):
             monkeypatch.setattr("sys.argv", ["streamgage.py", "River", "--out", str(tmp_path / "x.html"),
                                              *args])

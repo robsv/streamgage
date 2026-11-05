@@ -14,6 +14,7 @@ rising/falling arrow and a 7-day sparkline.
 
 Examples:
     python streamgage.py "Peace River"
+    python streamgage.py "Peace River" --as-of 2026-11-03T12:00-05:00   # the river at a past moment
     python streamgage.py "Myakka River" --state FL
     python streamgage.py "Peace River" --list         # show candidate gages and exit
     python streamgage.py "Peace River" --anchor 02296750   # skip the name lookup
@@ -34,10 +35,18 @@ import requests
 NLDI = "https://api.water.usgs.gov/nldi/linked-data/nwissite"
 NWIS = "https://waterservices.usgs.gov/nwis"
 SITE_SERVICE = f"{NWIS}/site/"  # site catalog: what each site has ever measured
+STAT_SERVICE = f"{NWIS}/stat/"  # daily statistics over every year of record
 NWPS = "https://api.water.noaa.gov/nwps/v1/gauges"
 GAGE_HEIGHT = "00065"
 DAILY_MAX, DAILY_MIN, DAILY_MEAN = "00001", "00002", "00003"  # NWIS statistic codes
 MIN_HISTORY_DAYS = 30  # fewer daily values than this and there is no yearly percentile
+MAX_STAT_SITES = 10  # the statistics service rejects requests for more sites than this
+MIN_STAT_YEARS = 10  # fewer years of record than this and there is no long-term percentile
+# the statistics columns that give the distribution of one calendar day across all years of
+# record, and the percentile each one is (the minimum is the 0th and the maximum the 100th)
+STAT_COLUMNS = (("min_va", 0), ("p05_va", 5), ("p10_va", 10), ("p20_va", 20), ("p25_va", 25),
+                ("p50_va", 50), ("p75_va", 75), ("p80_va", 80), ("p90_va", 90), ("p95_va", 95),
+                ("max_va", 100))
 RETIRED_AFTER = timedelta(days=365)  # no data for this long: "retired" rather than "offline"
 CONTINUOUS = ("uv", "dv")  # catalog data types: real-time (15-minute) and daily values
 STAGE_OR_FLOW = (GAGE_HEIGHT, "00060")  # a "gage" here means stage or discharge, not just water quality
@@ -180,13 +189,22 @@ def usable(value):
     return None if v <= NO_DATA or not math.isfinite(v) else v
 
 
-def fetch_current(site_ids):
-    """Latest gage height per site; only sites actively reporting recent stage are returned."""
-    out, cutoff = {}, datetime.now(timezone.utc) - STALE_AFTER
+def fetch_current(site_ids, as_of=None):
+    """Latest gage height per site; only sites reporting recent stage are returned.
+
+    With `as_of` (an aware datetime), the latest reading at or before that moment, and "recent" is
+    judged against it. Sites then are not limited to those active today.
+    """
+    out = {}
+    cutoff = (as_of or datetime.now(timezone.utc)) - STALE_AFTER
+    if as_of:
+        when = {"startDT": cutoff.isoformat(timespec="minutes"), "endDT": as_of.isoformat(timespec="minutes")}
+    else:
+        when = {"siteStatus": "active"}
     for i in range(0, len(site_ids), MAX_SITES_PER_REQUEST):
         chunk = site_ids[i:i + MAX_SITES_PER_REQUEST]
         data = get_json(f"{NWIS}/iv/", format="json", sites=",".join(chunk),
-                        parameterCd=GAGE_HEIGHT, siteStatus="active")
+                        parameterCd=GAGE_HEIGHT, **when)
         for ts in data["value"]["timeSeries"]:
             vals = ts["values"][0]["value"]
             if not vals:
@@ -197,6 +215,33 @@ def fetch_current(site_ids):
                 continue
             out[ts["sourceInfo"]["siteCode"][0]["value"]] = (stage, v["dateTime"])
     return out
+
+
+def parse_as_of(text, now=None):
+    """Read --as-of: an ISO 8601 time that carries its UTC offset, such as 2026-11-03T12:00-05:00 or
+    2026-11-03T17:00Z. The offset is required because the tool has no timezone database and a bare
+    clock time would be a guess. Raises ValueError, with a message fit to show, for anything else,
+    including a time that has not happened yet."""
+    raw = text.strip()
+    if raw[-1:] in ("Z", "z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        when = datetime.fromisoformat(raw)
+    except ValueError:
+        raise ValueError(f"cannot read {text!r} as a time; use something like 2026-11-03T12:00-05:00 "
+                         "or 2026-11-03T17:00Z") from None
+    if when.tzinfo is None:
+        raise ValueError(f"{text!r} has no UTC offset; add one, for example 2026-11-03T12:00-05:00 "
+                         "(Eastern Standard Time) or end it with Z for UTC")
+    if when > (now or datetime.now(timezone.utc)):
+        raise ValueError(f"{text!r} is in the future")
+    return when
+
+
+def describe_moment(when):
+    """A past moment as shown on the page: 2026-11-03 12:00 UTC-05:00."""
+    offset = when.strftime("%z")
+    return f"{when:%Y-%m-%d %H:%M} UTC{offset[:3]}:{offset[3:]}"
 
 
 def get_text(url, **params):
@@ -253,6 +298,16 @@ def classify_site(rows, now=None):
     return ("other" if rows else "no_data"), {}
 
 
+def percentile_label(g):
+    """The percentile column for a gage with no NWS stages: pNN for the same calendar day over all
+    years of record, REC above every past value for the day and LOW below every one. A gage with no
+    long-term statistics shows its past-year percentile marked with a *, or n/a."""
+    lt = g.get("longterm")
+    if lt:
+        return {"above": "REC", "below": "LOW"}.get(lt["status"]) or f"p{lt['pct']:.0f}"
+    return f"p{g['pct']:.0f}*" if g.get("pct") is not None else "n/a"
+
+
 def describe_sites(n_sites, n_reporting, counts, retired_count, draw_retired):
     """The one-line summary printed to stderr: where every site on the river went."""
     msg = f"{n_sites} sites on river: {n_reporting} reporting stage"
@@ -270,16 +325,17 @@ def describe_sites(n_sites, n_reporting, counts, retired_count, draw_retired):
     return msg
 
 
-def fetch_history(site):
-    """Past year of daily gage heights for a site (empty if unavailable).
+def fetch_history(site, as_of=None):
+    """Past year of daily gage heights for a site (empty if unavailable); the year ending at `as_of`.
 
     Uses the daily mean. Some sites publish only a daily max and min for stage (the response then
     lists max first, so taking the first series would silently compare against daily maxima); for
     those the midpoint of each day's max and min stands in for the mean.
     """
     try:
-        data = get_json(f"{NWIS}/dv/", format="json", sites=site,
-                        parameterCd=GAGE_HEIGHT, period="P365D")
+        window = ({"startDT": (as_of - timedelta(days=365)).date().isoformat(), "endDT": as_of.date().isoformat()}
+                  if as_of else {"period": "P365D"})
+        data = get_json(f"{NWIS}/dv/", format="json", sites=site, parameterCd=GAGE_HEIGHT, **window)
         by_stat = {ts["name"].rsplit(":", 1)[-1]:
                    {v["dateTime"]: usable(v["value"]) for v in ts["values"][0]["value"]}
                    for ts in data["value"]["timeSeries"]}
@@ -299,11 +355,14 @@ def percentile(history, value):
     return 100 * sum(h <= value for h in history) / len(history)
 
 
-def fetch_recent(site):
-    """Last RECENT_DAYS of instantaneous gage heights as [(epoch seconds, ft)] (empty if unavailable)."""
+def fetch_recent(site, as_of=None):
+    """Last RECENT_DAYS of instantaneous gage heights as [(epoch seconds, ft)] (empty if unavailable);
+    the days ending at `as_of` when given."""
     try:
-        data = get_json(f"{NWIS}/iv/", format="json", sites=site,
-                        parameterCd=GAGE_HEIGHT, period=f"P{RECENT_DAYS}D")
+        window = ({"startDT": (as_of - timedelta(days=RECENT_DAYS)).isoformat(timespec="minutes"),
+                   "endDT": as_of.isoformat(timespec="minutes")}
+                  if as_of else {"period": f"P{RECENT_DAYS}D"})
+        data = get_json(f"{NWIS}/iv/", format="json", sites=site, parameterCd=GAGE_HEIGHT, **window)
         series = data["value"]["timeSeries"]
         if not series:
             return []
@@ -358,6 +417,85 @@ def recent_stats(pts, now=None):
     return {"low": lo, "high": hi, "peak": peak, "peak_time": round(peak_t * 1000),
             "range_pos": 100 * (stage - lo) / (hi - lo) if hi - lo >= MIN_RANGE_FT else None,
             "rate": rate, "delta24": delta24, "series": list(hourly.values())}
+
+
+def reading_day(when):
+    """The (month, day) of a reading on the gage's own clock; its timestamp carries the UTC offset."""
+    d = datetime.fromisoformat(when)
+    return d.month, d.day
+
+
+def fetch_daily_stats(dates):
+    """The statistics row for each site's own calendar day: {site: row}.
+
+    `dates` maps site -> (month, day). The service takes at most MAX_STAT_SITES sites per request, so
+    sites go in batches that run in parallel. A batch that fails is skipped, so its sites simply have
+    no long-term statistics; sites the service has no statistics for are absent from the result.
+    """
+    sites = sorted(dates)
+    batches = [sites[i:i + MAX_STAT_SITES] for i in range(0, len(sites), MAX_STAT_SITES)]
+
+    def fetch(batch):
+        try:
+            text = get_text(STAT_SERVICE, format="rdb", sites=",".join(batch), statReportType="daily",
+                            statTypeCd="all", parameterCd=GAGE_HEIGHT)
+            rows = parse_rdb(text)
+            return {r["site_no"]: r for r in rows
+                    if r["site_no"] in dates and (int(r["month_nu"]), int(r["day_nu"])) == dates[r["site_no"]]}
+        except (requests.RequestException, KeyError, ValueError):
+            return {}
+
+    found = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for part in pool.map(fetch, batches):
+            found.update(part)
+    return found
+
+
+def long_term(stage, row):
+    """Where a stage falls among the same calendar day's values in every year of record.
+
+    `row` is a statistics row (see fetch_daily_stats). The service gives only a few percentile points
+    (5th, 10th, 20th, 25th, 50th, 75th, 80th, 90th and 95th, plus the minimum and maximum), so the
+    percentile is interpolated between the points that are present. Returns None when the record is
+    shorter than MIN_STAT_YEARS or the minimum or maximum is missing. Otherwise a dict whose "status"
+    is "within", "above" (higher than every past value, percentile 100) or "below" (lower than every
+    one, percentile 0), with the span of the record and its median and extremes for display.
+    """
+    try:
+        years = int(row["count_nu"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if years < MIN_STAT_YEARS:
+        return None
+    anchors = sorted((v, pct) for col, pct in STAT_COLUMNS if (v := usable(row.get(col))) is not None)
+    if len(anchors) < 2 or anchors[0][1] != 0 or anchors[-1][1] != 100:
+        return None  # without the minimum and the maximum there is nothing to bound the range
+    low, high = anchors[0][0], anchors[-1][0]
+    if stage > high:
+        status, pct = "above", 100.0
+    elif stage < low:
+        status, pct = "below", 0.0
+    else:
+        status = "within"
+        same = [p for v, p in anchors if v == stage]
+        if same:  # on a flat stretch (repeated values) take the middle of its percentile span
+            pct = (min(same) + max(same)) / 2
+        else:
+            v0, p0 = [a for a in anchors if a[0] < stage][-1]
+            v1, p1 = next(a for a in anchors if a[0] > stage)
+            pct = p0 + (p1 - p0) * (stage - v0) / (v1 - v0)
+
+    def year(col):
+        text = row.get(col, "").strip()
+        return int(text) if text.isdigit() else None
+
+    return {"pct": round(pct, 1), "status": status, "years": years,
+            "first": year("begin_yr"), "last": year("end_yr"),
+            "month": int(row["month_nu"]), "day": int(row["day_nu"]),
+            "median": usable(row.get("p50_va")),
+            "high": high, "high_year": year("max_va_yr"),
+            "low": low, "low_year": year("min_va_yr")}
 
 
 def fetch_nws(site, lat, lon, nws_gauges):
@@ -418,11 +556,15 @@ def pretty_name(name):
     return " ".join(words)
 
 
-def build_gages(anchor, distance_km, draw_retired=False):
+def build_gages(anchor, distance_km, draw_retired=False, as_of=None):
     """Return (flowlines, gages, retired). `retired` lists the sites that no longer report stage but
-    once had a stage or flow record; it is only filled in when draw_retired is set."""
+    once had a stage or flow record; it is only filled in when draw_retired is set.
+
+    With `as_of` (an aware datetime) the gages are as they were at that moment. NWS forecasts are not
+    kept for past times, so there are none; flood stages and the site catalog are today's.
+    """
     lines, sites = fetch_river(anchor, distance_km)
-    current = fetch_current(list(sites))
+    current = fetch_current(list(sites), as_of)
     not_reporting = [s for s in sites if s not in current]
     counts, retired = None, []
     if not_reporting:
@@ -433,12 +575,15 @@ def build_gages(anchor, distance_km, draw_retired=False):
         if catalog is not None:
             counts = {}
             for site in not_reporting:
-                category, info = classify_site(catalog.get(site, []))
+                category, info = classify_site(catalog.get(site, []), as_of)
                 counts[category] = counts.get(category, 0) + 1
                 if category in ("retired", "offline"):
                     name, lat, lon = sites[site]
                     retired.append({"site": site, "name": pretty_name(name), "lat": lat, "lon": lon,
                                     "status": category, **info})
+    if as_of:
+        print(f"Showing the river as of {describe_moment(as_of)}. The NWS keeps no past forecasts, so there are "
+              "no forecast rings or charts.", file=sys.stderr)
     print(describe_sites(len(sites), len(current), counts, len(retired), draw_retired), file=sys.stderr)
     if not current:
         sys.exit("No gages on this river are reporting recent gage height (parameter 00065).")
@@ -449,19 +594,22 @@ def build_gages(anchor, distance_km, draw_retired=False):
                             "bbox.xmax": max(lons) + 0.02, "bbox.ymax": max(lats) + 0.02,
                             "srid": "EPSG_4326"})["gauges"]
 
+    stats = fetch_daily_stats({site: reading_day(when) for site, (_, when) in current.items()})
+
     def build(site):
         name, lat, lon = sites[site]
         stage, when = current[site]
         gage = {"site": site, "name": pretty_name(name), "lat": lat,
                 "lon": lon, "stage": stage, "time": when,
-                "recent": recent_stats(fetch_recent(site))}
+                "recent": recent_stats(fetch_recent(site, as_of), now=as_of.timestamp() if as_of else None),
+                "longterm": long_term(stage, stats[site]) if site in stats else None}
         flood = fetch_nws(site, lat, lon, nws)
         if flood:
             gage.update(method="nws", lid=flood["lid"], stages=flood["stages"],
                         category=flood_category(stage, flood["stages"]),
-                        forecast=fetch_forecast(flood["lid"], flood["stages"]))
+                        forecast=None if as_of else fetch_forecast(flood["lid"], flood["stages"]))
         else:
-            pct = percentile(fetch_history(site), stage)
+            pct = percentile(fetch_history(site, as_of), stage)
             gage.update(method="percentile", pct=pct)
         return gage
 
@@ -501,11 +649,16 @@ HTML = """<!doctype html>
   .mk.dia .gl { transform: rotate(-45deg); }  /* keep the glyph upright inside the rotated square */
   .gl.fast { font-size: 8px; line-height: 6px; }
   .gl.fast i { display: block; font-style: normal; }
+  .gl svg { display: block; }
+  .pop b svg { vertical-align: middle; }
+  .crest-sw { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px;
+              border-radius: 50%; background: #6b6b6b; vertical-align: middle; margin-right: 4px; }
   .rt { width: 10px; height: 10px; border: 2px solid #6b6b6b; border-radius: 50%;
         background: rgba(255,255,255,.7); }
   .sw.ret { width: 8px; height: 8px; border: 2px solid #6b6b6b; border-radius: 50%; background: #fff; }
   .modes label { display: block; cursor: pointer; }
   .cap { font-size: 10px; color: #666; }
+  .sub { color: #666; }
   .pop table { border-collapse: collapse; }
   .pop td { padding: 1px 8px 1px 0; }
 </style>
@@ -519,15 +672,18 @@ const RIVER = __RIVER__;
 const GAGES = __GAGES__;
 const RETIRED = __RETIRED__;
 const GENERATED = "__GENERATED__";
+const AS_OF = __AS_OF__;
 const TITLE = __TITLE_JSON__;
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 
 const NWS = {normal: ["#2e9e4f", "Normal"], action: ["#f2d424", "Action"],
              minor: ["#f28c1c", "Minor flood"], moderate: ["#d62828", "Moderate flood"],
              major: ["#8e2fb8", "Major flood"]};
-const PCT = [[10, "#c9b79c", "Below 10th pct"], [25, "#9ecae1", "10th-25th"],
-             [75, "#4a90c8", "25th-75th"], [90, "#1f5fa8", "75th-90th"],
-             [101, "#0b2f6b", "Above 90th pct"]];
+// percentile of the same calendar day over every year of record; the last bin is for a stage higher
+// than any past value on that day (binned as 101 so it never lands in the one before)
+const DATE_BINS = [[5, "#c9b79c", "Below 5th"], [25, "#9ecae1", "5th-25th"], [75, "#4a90c8", "25th-75th"],
+                   [95, "#1f5fa8", "75th-95th"], [101, "#0b2f6b", "95th, up to the record"],
+                   [Infinity, "#b0006f", "Above the record for this date"]];
 // position within the last 7 days' min..max: 100 = at the peak right now
 const RANGE = [[10, "#c9b79c", "Near 7-day low (<10%)"], [30, "#9ecae1", "10-30%"],
                [70, "#4a90c8", "30-70%"], [90, "#1f5fa8", "70-90%"],
@@ -541,7 +697,8 @@ const TREND = [[-0.10, "#2166ac", "Falling fast (< -0.10 ft/h)", "▼▼"],
 const MODES = {
   range: {label: "Position in 7-day range", legend: "No NWS stages: position in 7-day range", bins: RANGE},
   trend: {label: "Trend (last 6 h)", legend: "No NWS stages: trend over last 6 h", bins: TREND},
-  pct:   {label: "Percentile of past year", legend: "No NWS stages: percentile of past year", bins: PCT},
+  date:  {label: "Percentile for this date (all years)", legend: "No NWS stages: percentile for this date",
+          bins: DATE_BINS},
 };
 const NODATA = "#999999";
 let mode = "range";
@@ -555,15 +712,55 @@ const trendBin = g => {
 };
 // round once, so the number shown in a popup and the color bin it falls in always agree
 const rounded = v => v == null ? null : Math.round(v);
+function dateValue(g) {
+  const lt = g.longterm;
+  return !lt ? null : lt.status === "above" ? 101 : Math.round(lt.pct);
+}
 function binFor(g) {
   return mode === "trend" ? trendBin(g)
-       : bin(MODES[mode].bins, rounded(mode === "range" ? g.recent && g.recent.range_pos : g.pct));
+       : bin(MODES[mode].bins, mode === "range" ? rounded(g.recent && g.recent.range_pos) : dateValue(g));
 }
 function color(g) {
   if (g.method === "nws") return NWS[g.category][0];
   const b = binFor(g);
   return b ? b[1] : NODATA;
 }
+
+// "Cresting": the stage has levelled off just past its 7-day high. Strict on purpose: the peak must
+// already be behind us, so a gage still setting new highs is not called cresting. It is only a glyph;
+// the trend color stays "steady".
+const STEADY_BAND = 0.02;        // ft/h: the edge of the "steady" trend bin
+const CREST_MIN_AGE_H = 0.25;    // the 7-day peak was at least this long ago (15 minutes)...
+const CREST_MAX_AGE_H = 6;       // ...and no longer ago than this
+const CREST_MIN_RANGE_POS = 95;  // and the stage is still in the top 5% of its 7-day range
+const peakAgeHours = g => (Date.parse(g.time) - g.recent.peak_time) / 36e5;
+function isCresting(g) {
+  const r = g.recent;
+  if (!r || r.rate == null || r.range_pos == null) return false;
+  const age = peakAgeHours(g);
+  return Math.abs(r.rate) <= STEADY_BAND && r.range_pos >= CREST_MIN_RANGE_POS &&
+         age >= CREST_MIN_AGE_H && age <= CREST_MAX_AGE_H;
+}
+// at the top of the week's range with the peak not yet behind it (the latest reading is the high)
+const atWeeklyHigh = g => !!g.recent && g.recent.range_pos != null &&
+                          g.recent.range_pos >= CREST_MIN_RANGE_POS && peakAgeHours(g) < CREST_MIN_AGE_H;
+// a crest then a trough: a wave. White with a dark halo for use on a colored marker; pass a dark ink
+// and no halo to draw it on a light background.
+function crestSvg(w = 16, h = 10, ink = "#fff", halo = "#000") {
+  const d = "M2 6 A3 3 0 0 1 8 6 A3 3 0 0 0 14 6";
+  return `<svg width="${w}" height="${h}" viewBox="0 0 16 10" fill="none" stroke-linecap="round" role="img" aria-label="cresting">` +
+         (halo ? `<path d="${d}" stroke="${halo}" stroke-width="3.6" opacity=".9"/>` : "") +
+         `<path d="${d}" stroke="${ink}" stroke-width="${halo ? 1.9 : 1.8}"/></svg>`;
+}
+function glyphFor(g) {
+  if (isCresting(g)) return `<span class="gl">${crestSvg()}</span>`;
+  const tb = trendBin(g), chars = tb ? [...tb[3]] : [];  // doubled glyphs (fast) are stacked vertically
+  return !chars.length ? "" : chars.length > 1
+    ? `<span class="gl fast">${chars.map(c => `<i>${c}</i>`).join("")}</span>`
+    : `<span class="gl">${chars[0]}</span>`;
+}
+const crestLegendLine = () => `<div style="margin-top:2px"><span class="crest-sw">${crestSvg(14, 9)}</span>` +
+                              `= at its crest: just past its 7-day high, levelling off</div>`;
 
 const map = L.map("map");
 const base = {
@@ -632,7 +829,14 @@ function recentRows(g) {
   if (!r) return `<tr><td>Recent trend</td><td>n/a (too few readings)</td></tr>`;
   const ref = new Date(g.time).getTime(), tb = trendBin(g);
   let rows = "";
-  if (tb) rows += `<tr><td>Trend (6 h)</td><td><b>${tb[3] ? tb[3] + " " : ""}${tb[2].split(" (")[0]}</b> ${signed(r.rate, 3)} ft/h</td></tr>`;
+  if (tb) {
+    const cresting = isCresting(g);
+    let label = tb[2].split(" (")[0];
+    if (cresting) label = "Cresting";
+    else if (tb[2].startsWith("Steady") && atWeeklyHigh(g)) label = "Steady, at its 7-day high";
+    const mark = cresting ? crestSvg(14, 9, "#222", null) + " " : tb[3] ? tb[3] + " " : "";
+    rows += `<tr><td>Trend (6 h)</td><td><b>${mark}${label}</b> ${signed(r.rate, 3)} ft/h</td></tr>`;
+  }
   if (r.delta24 != null) rows += `<tr><td>Change (24 h)</td><td>${signed(r.delta24)} ft</td></tr>`;
   rows += `<tr><td>7-day range</td><td>${r.low.toFixed(2)} to ${r.high.toFixed(2)} ft` +
           (r.range_pos == null ? " (flat)" : ` (now at ${Math.round(r.range_pos)}%)`) + `</td></tr>`;
@@ -640,10 +844,27 @@ function recentRows(g) {
   return rows;
 }
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function longTermRow(g) {
+  const lt = g.longterm;
+  if (!lt) return `<tr><td>This date</td><td>no long-term statistics</td></tr>`;
+  const inYear = y => y ? ` in ${y}` : "";
+  const sub = [`${lt.years} years` + (lt.first && lt.last ? `, ${lt.first}-${lt.last}` : "")];
+  if (lt.median != null) sub.push(`median ${lt.median.toFixed(2)} ft`);
+  let head;
+  if (lt.status === "above") head = `<b>Above the record</b> (previous high ${lt.high.toFixed(2)} ft${inYear(lt.high_year)})`;
+  else if (lt.status === "below") head = `<b>Below the record low</b> (previous low ${lt.low.toFixed(2)} ft${inYear(lt.low_year)})`;
+  else {
+    head = `<b>${ordinal(Math.round(lt.pct))} percentile</b>`;
+    sub.push(`record ${lt.high.toFixed(2)} ft${lt.high_year ? ` (${lt.high_year})` : ""}`);
+  }
+  return `<tr><td>For ${MONTHS[lt.month - 1]} ${lt.day}</td><td>${head}<br><span class="sub">${sub.join("; ")}</span></td></tr>`;
+}
+
 function popup(g) {
   const t = new Date(g.time).toLocaleString();
   let rows = `<tr><td>Stage</td><td><b>${g.stage.toFixed(2)} ft</b></td></tr>
-              <tr><td>Reported</td><td>${t}</td></tr>` + recentRows(g);
+              <tr><td>Reported</td><td>${t}</td></tr>` + recentRows(g) + longTermRow(g);
   if (g.method === "nws") {
     rows += `<tr><td>NWS category</td><td><b>${NWS[g.category][1]}</b></td></tr>`;
     for (const c of ["action", "minor", "moderate", "major"])
@@ -651,7 +872,7 @@ function popup(g) {
     if (g.forecast) {
       const f = g.forecast, ct = new Date(f.crest_time).toLocaleString([], {weekday: "short", hour: "numeric"});
       rows += `<tr><td>Forecast crest</td><td><b>${f.crest.toFixed(1)} ft</b> (${NWS[f.crest_category][1]}) ${ct}</td></tr>`;
-    } else rows += `<tr><td>Forecast</td><td>none issued</td></tr>`;
+    } else rows += `<tr><td>Forecast</td><td>${AS_OF ? "not kept for past times" : "none issued"}</td></tr>`;
     rows += `<tr><td>NWS gauge</td><td><a href="https://water.noaa.gov/gauges/${esc(g.lid)}" target="_blank">${esc(g.lid)}</a></td></tr>`;
   } else {
     rows += `<tr><td>Past year</td><td>${g.pct == null ? "n/a (short record)" : ordinal(Math.round(g.pct)) + " percentile"}</td></tr>`;
@@ -661,11 +882,7 @@ function popup(g) {
 }
 
 function icon(g) {
-  const shape = g.method === "nws" ? "round" : "dia", tb = trendBin(g);
-  const chars = tb ? [...tb[3]] : [];  // doubled glyphs (fast) are stacked vertically
-  const glyph = !chars.length ? "" : chars.length > 1
-    ? `<span class="gl fast">${chars.map(c => `<i>${c}</i>`).join("")}</span>`
-    : `<span class="gl">${chars[0]}</span>`;
+  const shape = g.method === "nws" ? "round" : "dia", glyph = glyphFor(g);
   return L.divIcon({className: "", iconSize: [24, 24],
     html: `<div class="mkw"><div class="mk ${shape}${g.forecast ? " fc" : ""}" style="background:${color(g)};` +
           `--fc:${g.forecast ? NWS[g.forecast.crest_category][0] : "#fff"}">${glyph}</div></div>`});
@@ -700,6 +917,7 @@ function drawLegend() {
   for (const [, c, n] of MODES[mode].bins) h += `<div><span class="sw dia" style="background:${c}"></span>${n}</div>`;
   h += `<div><span class="sw dia" style="background:${NODATA}"></span>No data</div>`;
   h += "<div style='margin-top:4px'>▲/▼ inside a gage = rising/falling over the last 6 h (double = fast)<br>▬ = steady, none = no trend data</div>";
+  if (GAGES.some(isCresting)) h += crestLegendLine();
   if (RETIRED.length) h += '<div style="margin-top:4px"><span class="sw ret"></span>No longer reporting (retired or offline)</div>';
   legend.getContainer().innerHTML = h;
 }
@@ -725,7 +943,8 @@ modeCtl.addTo(map);
 const title = L.control({position: "topright"});
 title.onAdd = () => {
   const d = L.DomUtil.create("div", "panel");
-  d.innerHTML = `<h4>${esc(TITLE)} stream gages</h4>${GAGES.length} gage${GAGES.length === 1 ? "" : "s"}${RETIRED.length ? ` + ${RETIRED.length} no longer reporting` : ""} &middot; generated ${GENERATED}`;
+  d.innerHTML = `<h4>${esc(TITLE)} stream gages</h4>${GAGES.length} gage${GAGES.length === 1 ? "" : "s"}${RETIRED.length ? ` + ${RETIRED.length} no longer reporting` : ""} &middot; ` +
+    (AS_OF ? `as of ${esc(AS_OF)}<br><span class="cap">generated ${GENERATED}</span>` : `generated ${GENERATED}`);
   return d;
 };
 title.addTo(map);
@@ -745,6 +964,9 @@ def main():
                     help="miles to navigate each direction (default: %(default)g)")
     ap.add_argument("--retired", action="store_true",
                     help="also draw gages that no longer report stage (retired or offline) as faint markers")
+    ap.add_argument("--as-of", metavar="TIME", dest="as_of",
+                    help="show the river as it was at a past moment, an ISO 8601 time with its UTC offset, "
+                         "e.g. 2026-11-03T12:00-05:00 (no NWS forecasts for past times)")
     ap.add_argument("--out", default=None, help="output HTML path")
     args = ap.parse_args()
     if not args.river and not args.anchor:
@@ -752,12 +974,17 @@ def main():
 
     if args.list and not args.river:
         ap.error("--list needs a river name")
+    try:
+        as_of = parse_as_of(args.as_of) if args.as_of else None
+    except ValueError as err:
+        ap.error(f"--as-of: {err}")
     # --list always shows candidates (and exits), even if --anchor was also given
     anchor = args.anchor if args.anchor and not args.list else resolve_anchor(
         args.river, args.state, args.list)
     title = args.river or f"USGS {anchor}"
-    lines, gages, retired = build_gages(anchor, round(args.distance * KM_PER_MILE), args.retired)
-    out = args.out or re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") + "_gages.html"
+    lines, gages, retired = build_gages(anchor, round(args.distance * KM_PER_MILE), args.retired, as_of)
+    stem = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") + (f"_{as_of:%Y-%m-%d_%H%M}" if as_of else "")
+    out = args.out or f"{stem}_gages.html"
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     def safe_json(obj):  # keep "</script>" in a site name from ending the script block
@@ -765,9 +992,10 @@ def main():
 
     values = {"TITLE": html.escape(title), "TITLE_JSON": safe_json(title),
               "RIVER": safe_json({"type": "FeatureCollection", "features": lines}),
-              "GAGES": safe_json(gages), "RETIRED": safe_json(retired), "GENERATED": generated}
+              "GAGES": safe_json(gages), "RETIRED": safe_json(retired), "GENERATED": generated,
+              "AS_OF": safe_json(describe_moment(as_of) if as_of else None)}
     # one pass, so text inside a substituted value can never be mistaken for a placeholder
-    page = re.sub(r"__(TITLE_JSON|TITLE|RIVER|GAGES|RETIRED|GENERATED)__", lambda m: values[m.group(1)], HTML)
+    page = re.sub(r"__(TITLE_JSON|TITLE|RIVER|GAGES|RETIRED|AS_OF|GENERATED)__", lambda m: values[m.group(1)], HTML)
     with open(out, "w", encoding="utf-8") as f:
         f.write(page)
     print(f"Wrote {out}", file=sys.stderr)
@@ -775,7 +1003,7 @@ def main():
         fc = g.get("forecast")
         info = ((f"{g['category']:8s}" + (f" -> crest {fc['crest']} ft {fc['crest_category']} {fc['crest_time']}" if fc else ""))
                 if g["method"] == "nws"
-                else f"p{g['pct']:.0f}" if g["pct"] is not None else "n/a")
+                else percentile_label(g))
         r = g["recent"]
         trend = f"{r['rate']:+.3f} ft/h" if r and r["rate"] is not None else "n/a"
         print(f"{g['site']}  {g['stage']:7.2f} ft  {info:9s} {trend:>11s}  {g['name']}")

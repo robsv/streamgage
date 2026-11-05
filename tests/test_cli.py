@@ -29,14 +29,15 @@ def river(monkeypatch, route):
              "02297345": ("PEACE RIVER AT PLATT FL", 27.09, -82.0)}
     monkeypatch.setattr(sg, "fetch_river", lambda anchor, km: ([{"line": 1}], sites))
     monkeypatch.setattr(sg, "fetch_current",
-                        lambda ids: {"02296750": (15.5, now_iso()), "02297345": (2.89, now_iso())})
-    monkeypatch.setattr(sg, "fetch_recent", lambda site: readings())
+                        lambda ids, as_of=None: {"02296750": (15.5, now_iso()), "02297345": (2.89, now_iso())})
+    monkeypatch.setattr(sg, "fetch_recent", lambda site, as_of=None: readings())
     monkeypatch.setattr(sg, "fetch_nws", lambda site, lat, lon, gauges: (
         {"lid": "ARCF1", "stages": STAGES} if site == "02296750" else None))
     monkeypatch.setattr(sg, "fetch_forecast", lambda lid, stages: {
         "issued": "x", "series": [], "crest": 16.5, "crest_time": "t", "crest_category": "major"})
-    monkeypatch.setattr(sg, "fetch_history", lambda site: [float(i) / 10 for i in range(40)])
+    monkeypatch.setattr(sg, "fetch_history", lambda site, as_of=None: [float(i) / 10 for i in range(40)])
     monkeypatch.setattr(sg, "fetch_catalog", lambda ids: {})
+    monkeypatch.setattr(sg, "fetch_daily_stats", lambda dates: {})
     return route({sg.NWPS: {"gauges": [{"lid": "ARCF1"}]}})
 
 
@@ -59,6 +60,9 @@ class TestBuildGages:
         assert platt["pct"] == 72.5  # 29 of the 40 stub history values (0.0 to 3.9) are <= 2.89
         assert "forecast" not in platt and "stages" not in platt
 
+    def test_gages_without_statistics_have_no_long_term_percentile(self, river):
+        assert [g["longterm"] for g in sg.build_gages("02298300", 322)[1]] == [None, None]
+
     def test_every_gage_carries_recent_stats(self, river):
         for g in sg.build_gages("02298300", 322)[1]:
             assert g["recent"]["rate"] == pytest.approx(0.05, abs=0.001)
@@ -77,25 +81,25 @@ class TestBuildGages:
         assert params["srid"] == "EPSG_4326"
 
     def test_gages_not_reporting_are_left_out(self, river, monkeypatch):
-        monkeypatch.setattr(sg, "fetch_current", lambda ids: {"02297345": (2.89, now_iso())})
+        monkeypatch.setattr(sg, "fetch_current", lambda ids, as_of=None: {"02297345": (2.89, now_iso())})
         gages = sg.build_gages("02298300", 322)[1]
         assert [g["site"] for g in gages] == ["02297345"]
 
     def test_no_reporting_gages_exits(self, river, monkeypatch):
-        monkeypatch.setattr(sg, "fetch_current", lambda ids: {})
+        monkeypatch.setattr(sg, "fetch_current", lambda ids, as_of=None: {})
         with pytest.raises(SystemExit) as exc:
             sg.build_gages("02298300", 322)
         assert "No gages on this river are reporting recent gage height" in str(exc.value)
 
     def test_a_gage_with_no_recent_readings_keeps_its_other_data(self, river, monkeypatch):
-        monkeypatch.setattr(sg, "fetch_recent", lambda site: [])
+        monkeypatch.setattr(sg, "fetch_recent", lambda site, as_of=None: [])
         gages = sg.build_gages("02298300", 322)[1]
         assert len(gages) == 2
         assert all(g["recent"] is None for g in gages)
         assert {g["method"] for g in gages} == {"nws", "percentile"}
 
     def test_a_short_history_gives_no_percentile_but_still_a_gage(self, river, monkeypatch):
-        monkeypatch.setattr(sg, "fetch_history", lambda site: [1.0] * 5)
+        monkeypatch.setattr(sg, "fetch_history", lambda site, as_of=None: [1.0] * 5)
         platt = next(g for g in sg.build_gages("02298300", 322)[1] if g["site"] == "02297345")
         assert platt["pct"] is None
 
@@ -143,7 +147,7 @@ class TestMainTerminalOutput:
     def test_one_line_per_gage_in_the_documented_format(self, make_page, capsys):
         make_page([gage()])
         assert capsys.readouterr().out == (
-            "02297345     2.89 ft  p100      +0.008 ft/h  Peace River At Platt FL\n")
+            "02297345     2.89 ft  p94       +0.008 ft/h  Peace River At Platt FL\n")
 
     def test_nws_gage_prints_category_and_forecast_crest(self, make_page, capsys):
         nws = gage("02296750", "Peace River At SR 70 At Arcadia, FL", method="nws",
@@ -161,7 +165,7 @@ class TestMainTerminalOutput:
         assert re.match(r"\S+\s+2\.89 ft  normal    \+0\.008 ft/h  ", capsys.readouterr().out)
 
     def test_missing_percentile_and_trend_print_na(self, make_page, capsys):
-        make_page([gage(pct=None, recent=None)])
+        make_page([gage(pct=None, recent=None, longterm=None)])
         assert capsys.readouterr().out == (
             "02297345     2.89 ft  n/a               n/a  Peace River At Platt FL\n")
 
@@ -187,8 +191,8 @@ class TestCommandLine:
                 raise SystemExit(0)
             return "01234567"
 
-        def build(anchor, km, draw=False):
-            seen["anchor"], seen["distance"], seen["draw_retired"] = anchor, km, draw
+        def build(anchor, km, draw=False, as_of=None):
+            seen["anchor"], seen["distance"], seen["draw_retired"], seen["as_of"] = anchor, km, draw, as_of
             return [], [gage()], []
 
         monkeypatch.setattr(sg, "resolve_anchor", resolve)
