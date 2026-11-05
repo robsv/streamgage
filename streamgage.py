@@ -383,6 +383,7 @@ HTML = """<!doctype html>
   .panel { background: rgba(255,255,255,.95); padding: 8px 12px; border-radius: 6px;
            box-shadow: 0 1px 5px rgba(0,0,0,.4); font-size: 12px; line-height: 1.5; }
   .legend { max-height: 45vh; overflow-y: auto; }
+  .legend h4 { white-space: nowrap; }
   .panel h4 { margin: 0 0 4px; font-size: 13px; }
   .sw { display: inline-block; width: 12px; height: 12px; margin-right: 6px;
         vertical-align: middle; border: 1px solid rgba(0,0,0,.5); }
@@ -433,9 +434,9 @@ const TREND = [[-0.10, "#2166ac", "Falling fast (< -0.10 ft/h)", "▼▼"],
                [0.10, "#f4a582", "Rising", "▲"],
                [Infinity, "#b2182b", "Rising fast (> 0.10 ft/h)", "▲▲"]];
 const MODES = {
-  range: {label: "Position in 7-day range", legend: "No NWS stages: position in<br>7-day range", bins: RANGE},
-  trend: {label: "Trend (last 6 h)", legend: "No NWS stages: trend<br>over last 6 h", bins: TREND},
-  pct:   {label: "Percentile of past year", legend: "No NWS stages: percentile<br>of past year", bins: PCT},
+  range: {label: "Position in 7-day range", legend: "No NWS stages: position in 7-day range", bins: RANGE},
+  trend: {label: "Trend (last 6 h)", legend: "No NWS stages: trend over last 6 h", bins: TREND},
+  pct:   {label: "Percentile of past year", legend: "No NWS stages: percentile of past year", bins: PCT},
 };
 const NODATA = "#999999";
 let mode = "range";
