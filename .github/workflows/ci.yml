@@ -6,6 +6,7 @@ on:
     paths-ignore: ["**.md", "LICENSE"]   # a docs-only change needs no run (saves macOS minutes)
   pull_request:
     paths-ignore: ["**.md", "LICENSE"]
+  workflow_dispatch:   # the "Run workflow" button, for re-running CI without a new commit
 
 permissions:
   contents: read
