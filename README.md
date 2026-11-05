@@ -16,7 +16,7 @@ No API keys or accounts are needed; all data comes from free public U.S. governm
 
 > **Important: not for safety decisions.** This is a personal data-visualization tool. The readings
 > are USGS provisional data and the forecasts are NWS products, drawn as a snapshot of the moment the
-> script ran. The colors, trend arrows and percentiles are this tool's own summaries and can be wrong
+> script ran. The colors, trend glyphs and percentiles are this tool's own summaries and can be wrong
 > or out of date, and the code can contain bugs. Do not use this map to decide whether to evacuate,
 > drive through water, or protect property. For flood warnings use the official NWS pages at
 > [water.noaa.gov](https://water.noaa.gov), and in an emergency call your local emergency number
@@ -25,6 +25,24 @@ No API keys or accounts are needed; all data comes from free public U.S. governm
 > Provided as is, without warranty; see `LICENSE`. USGS, NOAA, NWS, Esri and Leaflet are names of
 > their respective owners. This project is independent and not affiliated with or endorsed by any of
 > them.
+
+## Sample
+
+Peace River, FL, in the default "position in 7-day range" coloring. Circles are gages with NWS flood
+stages: Zolfo Springs is yellow (action stage) with an orange ring because its forecast crest is minor
+flood, and Arcadia is purple (major flood) with a purple ring because its forecast crest is major
+flood. Diamonds are gages without NWS stages. The glyph inside each marker is the 6-hour trend.
+
+![Map of the Peace River, Florida, with 16 USGS gages as colored markers along the river, a "Color diamonds by" control at the left and a flood-category legend at the lower right](docs/peace-river-map.png)
+
+Clicking a gage opens its popup: the stage, the 6-hour trend, the 24-hour change, the 7-day range
+and peak, the yearly percentile, and a 7-day sparkline. Here is Peace River at Platt, which is at
+its 7-day peak and has just stopped rising:
+
+![Popup for Peace River at Platt, FL: stage 3.43 ft, steady trend, up 1.02 ft in 24 hours, at the top of its 7-day range, with a 7-day sparkline](docs/peace-river-popup.png)
+
+Both images are snapshots from 2026-11-05, made with
+`python3 streamgage.py "Peace River" --state FL` and a headless-Chrome screenshot.
 
 ## 1. Set up
 
@@ -112,7 +130,7 @@ If nothing matches, try the official spelling, or use `--list` or `--anchor`.
 
 The columns are the USGS site number, the current stage, then either the NWS flood category (with the
 forecast crest, if any) or the percentile `pNN` of the past year, the 6-hour trend in feet per hour
-(`n/a` when there are too few readings), and the gage name.
+(`n/a` when there are too few readings or the newest one is more than 3 hours old), and the gage name.
 
 ## What you get
 
@@ -175,9 +193,10 @@ range is under 0.1 ft or there are too few readings.
 | Dark red | Rising faster than 0.10 ft/h |
 
 **Percentile of past year.** Each diamond shows where the current stage falls among that gage's daily
-mean stages over the past 365 days. A 90th percentile reading means the stage is higher than on about
-90% of the days in the past year. A 100th percentile reading means it is at or above every daily value
-of the year.
+mean stages over the past 365 days (for gages with no published daily mean, the midpoint of each day's
+maximum and minimum; see [How it works](#how-it-works)). A 90th percentile reading means the stage is
+higher than on about 90% of the days in the past year. A 100th percentile reading means it is at or
+above every daily value of the year.
 
 | Color | Percentile |
 |---|---|
@@ -195,8 +214,8 @@ anything is flooding.
 ### The trend glyph
 
 Every gage with a trend gets a glyph inside its marker, whichever color mode is selected: ▲ rising,
-▼ falling, doubled when the rate is faster than 0.10 ft/h, and ▬ steady. No glyph means there were
-too few readings to compute a trend.
+▼ falling, doubled when the rate is faster than 0.10 ft/h, and ▬ steady. No glyph means no trend could
+be computed: too few readings, or the newest reading is more than 3 hours old.
 
 ### The forecast ring
 
@@ -280,7 +299,7 @@ Details worth knowing:
 | USGS monitoring-locations (OGC API) | Name search for gages and drainage areas | `api.waterdata.usgs.gov/ogcapi/v0` |
 | USGS NLDI (Network Linked Data Index) | River flowlines and gages along a river | `api.water.usgs.gov/nldi` |
 | USGS NWIS Instantaneous Values | Latest gage height (parameter `00065`) and the last 7 days | `waterservices.usgs.gov/nwis/iv` |
-| USGS NWIS Daily Values | Past year of daily mean gage height | `waterservices.usgs.gov/nwis/dv` |
+| USGS NWIS Daily Values | Past year of daily gage height (mean, or max/min midpoint) | `waterservices.usgs.gov/nwis/dv` |
 | NOAA NWPS (National Water Prediction Service) | NWS flood stages and stage forecasts | `api.water.noaa.gov/nwps/v1` |
 | Leaflet 1.9.4 | Map library, loaded from unpkg | `unpkg.com/leaflet@1.9.4` |
 | Esri and USGS tile servers | Basemap tiles | `server.arcgisonline.com`, `basemap.nationalmap.gov` |
@@ -309,7 +328,9 @@ default, USGS if you choose USGS Topo). Those hosts see the area you view.
 streamgage.py   the whole tool: data fetching, the HTML page template, and the command line
 pixi.toml       environment and tasks
 ruff.toml       lint settings
+docs/           the sample images used in this README
 .github/        CI workflow and Dependabot settings
+LICENSE         BSD 3-Clause
 ```
 
 ```
@@ -325,11 +346,11 @@ than docs.
   inside it, and the page data is embedded as JSON, so each output file is self-contained apart from
   Leaflet and the tiles. The `lint` environment is separate, so ruff is not installed for normal runs.
 - Generated maps (`*_gages.html`) are ignored by git.
-- Tunable constants are at the top of the file: `STALE_AFTER` (3 days), `MATCH_RADIUS_KM` (0.5), `KM_PER_MILE`,
-  `MAX_SITES_PER_REQUEST` (100, the NWIS limit), `RECENT_DAYS` (7), `TREND_HOURS` (6),
+- Tunable constants are at the top of the file: `STALE_AFTER` (3 days), `MATCH_RADIUS_KM` (0.5),
+  `KM_PER_MILE`, `MAX_SITES_PER_REQUEST` (100, the NWIS limit), `RECENT_DAYS` (7), `TREND_HOURS` (6),
   `MIN_RECENT_POINTS` (12), `MIN_RECENT_SPAN_HOURS` (24), `TREND_MAX_AGE_HOURS` (3),
-  `MIN_RANGE_FT` (0.1), `MIN_HISTORY_DAYS` (30) and `FLOOD_CATEGORIES`. The trend thresholds (0.02 and 0.10 ft/h)
-  are in the page's JavaScript, in the `TREND` table.
+  `MIN_RANGE_FT` (0.1), `MIN_HISTORY_DAYS` (30) and `FLOOD_CATEGORIES`. The trend thresholds
+  (0.02 and 0.10 ft/h) are in the page's JavaScript, in the `TREND` table.
 - To check how a page renders without a browser window, headless Chrome works:
   ```
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new \
