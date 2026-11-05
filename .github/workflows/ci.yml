@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   check:
-    name: Lint and smoke test (${{ matrix.os }})
+    name: Lint and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -29,14 +29,14 @@ jobs:
         with:
           locked: true   # fail if pixi.lock is out of date with pixi.toml
           cache: true
-          environments: default lint
+          environments: default lint test
       - name: Lint
         run: pixi run -e lint lint
-      - name: Smoke test (the script starts and parses its arguments; no network needed)
-        run: pixi run python streamgage.py --help
+      - name: Test (no network needed)
+        run: pixi run -e test test
 
   python310:
-    name: Smoke test on Python 3.10 (the oldest supported)
+    name: Test on Python 3.10 (the oldest supported)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -46,4 +46,4 @@ jobs:
           locked: true
           cache: true
           environments: py310
-      - run: pixi run -e py310 python streamgage.py --help
+      - run: pixi run -e py310 test
