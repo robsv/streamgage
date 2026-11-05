@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "LICENSE"]   # a docs-only change needs no run (saves macOS minutes)
+  pull_request:
+    paths-ignore: ["**.md", "LICENSE"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint and smoke test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: prefix-dev/setup-pixi@ad1da6449d9e506fd127fd67ab2d054a769f6a94 # v0.11.2
+        with:
+          locked: true   # fail if pixi.lock is out of date with pixi.toml
+          cache: true
+          environments: default lint
+      - name: Lint
+        run: pixi run -e lint lint
+      - name: Smoke test (the script starts and parses its arguments; no network needed)
+        run: pixi run python streamgage.py --help
+
+  python310:
+    name: Smoke test on Python 3.10 (the oldest supported)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: prefix-dev/setup-pixi@ad1da6449d9e506fd127fd67ab2d054a769f6a94 # v0.11.2
+        with:
+          locked: true
+          cache: true
+          environments: py310
+      - run: pixi run -e py310 python streamgage.py --help
