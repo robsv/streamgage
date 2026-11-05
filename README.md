@@ -72,7 +72,7 @@ first run creates the environment. The script prints a summary table to the term
 web, so you need an internet connection to view it.
 
 ```
-pixi run map [river] [--state STATE] [--anchor SITE] [--list] [--distance MILES] [--out PATH]
+pixi run map [river] [--state STATE] [--anchor SITE] [--list] [--distance MILES] [--retired] [--out PATH]
 ```
 
 Options (`--help` lists them all):
@@ -84,6 +84,7 @@ Options (`--help` lists them all):
 | `--anchor` | A USGS site number on the river (such as `02296750`). Skips the name lookup. |
 | `--list` | Print the candidate gages for the name, with basin sizes, and exit without drawing. |
 | `--distance` | Miles to walk upstream and downstream of the anchor. Default: `200`. |
+| `--retired` | Also draw gages that no longer report stage (retired, or offline) as faint markers in a layer you can switch off. See [Sites that are not on the map](#sites-that-are-not-on-the-map). |
 | `--out` | Output HTML path. Default: the river name with underscores plus `_gages.html` (`usgs_<site>_gages.html` when only `--anchor` is given). |
 
 At least one of `river` or `--anchor` is required.
@@ -120,7 +121,14 @@ number at the end of the page URL is the site number. For example, `USGS-0229675
 
 If nothing matches, try the official spelling, or use `--list` or `--anchor`.
 
-**Terminal output.** After writing the file, the script prints one line per gage, from north to south:
+**Terminal output.** While it works, the script prints a summary of where every site on the river went
+(to stderr):
+
+```
+45 sites on river: 16 reporting stage; 29 not (7 retired, 13 field visits only, 5 water quality only, 4 no data); --retired draws the 7 that no longer report
+```
+
+After writing the file, it prints one line per gage, from north to south:
 
 ```
 02295637    16.33 ft  minor    -> crest 16.2 ft minor 2026-11-05T06:00:00Z -0.023 ft/h  Peace River At US 17 At Zolfo Springs, FL
@@ -131,6 +139,8 @@ If nothing matches, try the official spelling, or use `--list` or `--anchor`.
 The columns are the USGS site number, the current stage, then either the NWS flood category (with the
 forecast crest, if any) or the percentile `pNN` of the past year, the 6-hour trend in feet per hour
 (`n/a` when there are too few readings or the newest one is more than 3 hours old), and the gage name.
+With `--retired`, a second list follows, headed "No longer reporting stage", with each gage's site
+number, the date of its last data, whether it is `retired` or `offline`, and its name.
 
 ## What you get
 
@@ -149,6 +159,7 @@ forecast crest, if any) or the percentile `pNN` of the past year, the 6-hour tre
 |---|---|
 | Circle | The gage has NWS flood stages. It is colored by NWS flood category. |
 | Diamond | The gage has no NWS flood stages. It is colored by the mode picked in the "Color diamonds by" control (default: position in its 7-day range). |
+| Small hollow gray ring | With `--retired` only: a gage that no longer reports stage. It has no color mode and no trend. |
 
 This split exists because a raw stage number means little across gages. Datums differ, so one gage
 may read 13 ft in flood while another reads 97 ft because its zero point is an elevation above sea
@@ -239,6 +250,33 @@ Click any marker to see:
 - for diamonds: the percentile of the past year
 - a link to the gage's USGS page
 
+A retired gage's popup shows its status (retired, or offline), the date of its last data and how long
+ago that was, the years its record covers, what it measured (stage, discharge, water temperature and
+so on), and the link to its USGS page.
+
+### Sites that are not on the map
+
+"45 sites on river, 16 reporting stage" can look as if 29 gages are broken. They are not: the count
+is every USGS location in the river's network, and most of those are not live gages. For each site that
+is not reporting stage, the script reads its USGS site catalog (what the site has ever measured, and
+when) and sorts it:
+
+| Category | What it is |
+|---|---|
+| retired | A stage or discharge record (real-time or daily) whose last data is more than a year old |
+| offline | The same, but the last data is within the past year |
+| discharge only | Reporting streamflow now but not stage (not drawn: stage is what the map shows) |
+| field visits only | No sensor; staff visited with a flow meter and the measurements were stored |
+| water quality only | Water samples only, with no stage or flow record |
+| other data only | Something else, such as annual peak flows |
+| no data | In the USGS database, with no data stored |
+
+On the Peace River, for example, 7 of the 29 are retired gages, 13 are field-visit sites (many of them
+a cluster near Bartow, measured in short studies), 5 are water-quality sites and 4 have no data. Only
+retired and offline gages can be drawn, with `--retired`: the others never had a stage record to show.
+The catalog is read for the summary line either way. If that request fails, the summary says "site
+details unavailable" and the map is unaffected.
+
 ### Basemaps
 
 A layer switcher in the top-left offers Esri Street Map (default), USGS Topo and Esri Satellite.
@@ -257,6 +295,7 @@ river line + gages on the same mainstem
    v
 gages reporting stage in the last 3 days
    |  USGS NWIS instantaneous values: 7 days per gage -> trend, range, peak, sparkline
+   |  USGS site catalog: what the sites that are NOT reporting have measured -> summary, --retired
    |  NOAA NWPS: is there an NWS gauge at the same spot?
    +--> yes: flood stages + stage forecast  -> circle
    +--> no:  past year of daily values      -> diamond (percentile available)
@@ -300,6 +339,7 @@ Details worth knowing:
 | USGS NLDI (Network Linked Data Index) | River flowlines and gages along a river | `api.water.usgs.gov/nldi` |
 | USGS NWIS Instantaneous Values | Latest gage height (parameter `00065`) and the last 7 days | `waterservices.usgs.gov/nwis/iv` |
 | USGS NWIS Daily Values | Past year of daily gage height (mean, or max/min midpoint) | `waterservices.usgs.gov/nwis/dv` |
+| USGS NWIS Site Service | What each site that is not reporting has measured, and when | `waterservices.usgs.gov/nwis/site` |
 | NOAA NWPS (National Water Prediction Service) | NWS flood stages and stage forecasts | `api.water.noaa.gov/nwps/v1` |
 | Leaflet 1.9.4 | Map library, loaded from unpkg | `unpkg.com/leaflet@1.9.4` |
 | Esri and USGS tile servers | Basemap tiles | `server.arcgisonline.com`, `basemap.nationalmap.gov` |
@@ -350,7 +390,8 @@ oldest supported), for every push to `main` and every pull request that changes 
   Leaflet and the tiles. The `lint` environment is separate, so ruff is not installed for normal runs.
 - **Tests** never touch the network. `tests/fixtures` holds real responses, trimmed to a few days:
   daily values for a site with a daily mean, one with only a daily max and min, and one with all
-  three; two days of instantaneous values; and an NWS gauge record. Everything else a test needs is
+  three; two days of instantaneous values; an NWS gauge record; and the site catalog for five Peace
+  River sites (retired, field-visit-only, water-quality-only, and live). Everything else a test needs is
   built in the test. A router fixture (`route` in `tests/conftest.py`) replaces `get_json`, and any
   request a test did not expect fails it. The page's JavaScript logic (marker colors, trend bins,
   number formatting) runs under Node from `tests/page_logic.js`; those tests skip when Node is not
@@ -360,7 +401,8 @@ oldest supported), for every push to `main` and every pull request that changes 
 - Tunable constants are at the top of the file: `STALE_AFTER` (3 days), `MATCH_RADIUS_KM` (0.5),
   `KM_PER_MILE`, `MAX_SITES_PER_REQUEST` (100, the NWIS limit), `RECENT_DAYS` (7), `TREND_HOURS` (6),
   `MIN_RECENT_POINTS` (12), `MIN_RECENT_SPAN_HOURS` (24), `TREND_MAX_AGE_HOURS` (3),
-  `MIN_RANGE_FT` (0.1), `MIN_HISTORY_DAYS` (30) and `FLOOD_CATEGORIES`. The trend thresholds
+  `MIN_RANGE_FT` (0.1), `MIN_HISTORY_DAYS` (30), `RETIRED_AFTER` (a year, the line between offline
+  and retired) and `FLOOD_CATEGORIES`. The trend thresholds
   (0.02 and 0.10 ft/h) are in the page's JavaScript, in the `TREND` table.
 - To check how a page renders without a browser window, headless Chrome works:
   ```
@@ -418,7 +460,10 @@ cause is that the Leaflet script from unpkg is blocked or unreachable.
   year a "navy" diamond can mean less than it sounds. Daily means also smooth out peaks, so a gage
   can exceed every daily value of the year without having set a record.
 - **Stage-reporting gages only.** Gages that report only discharge (flow) are not shown. Many USGS
-  gages do both.
+  gages do both. The summary line counts the discharge-only ones, but the map does not draw them.
+- **Retired gages are what the USGS catalog says.** Its dates are the ones USGS publishes; other
+  agencies may hold data for a site that the catalog lists as ended or empty. Field-visit,
+  water-quality and empty sites are never drawn, since they have no stage record to show.
 - **Many gages in a small area.** Near some towns, several gages sit within a few hundred meters
   of each other and their markers overlap. Zoom in to separate them.
 - **Name lookup limits.**

@@ -33,10 +33,21 @@ import requests
 
 NLDI = "https://api.water.usgs.gov/nldi/linked-data/nwissite"
 NWIS = "https://waterservices.usgs.gov/nwis"
+SITE_SERVICE = f"{NWIS}/site/"  # site catalog: what each site has ever measured
 NWPS = "https://api.water.noaa.gov/nwps/v1/gauges"
 GAGE_HEIGHT = "00065"
 DAILY_MAX, DAILY_MIN, DAILY_MEAN = "00001", "00002", "00003"  # NWIS statistic codes
 MIN_HISTORY_DAYS = 30  # fewer daily values than this and there is no yearly percentile
+RETIRED_AFTER = timedelta(days=365)  # no data for this long: "retired" rather than "offline"
+CONTINUOUS = ("uv", "dv")  # catalog data types: real-time (15-minute) and daily values
+STAGE_OR_FLOW = (GAGE_HEIGHT, "00060")  # a "gage" here means stage or discharge, not just water quality
+PARAM_NAMES = {GAGE_HEIGHT: "stage", "00060": "discharge", "00010": "water temperature",
+               "00095": "specific conductance", "00300": "dissolved oxygen", "00400": "pH",
+               "63680": "turbidity"}
+# the order and wording of the "not on the map" breakdown
+CATEGORY_LABELS = (("discharge_only", "discharge only"), ("offline", "offline"), ("retired", "retired"),
+                   ("field_visits", "field visits only"), ("water_quality", "water quality only"),
+                   ("other", "other data only"), ("no_data", "no data"))
 MONITORING = "https://api.waterdata.usgs.gov/ogcapi/v0/collections/monitoring-locations/items"
 NO_DATA = -999  # NWIS/NWPS report missing values as -999, -9999 or -999999
 MAX_SITES_PER_REQUEST = 100  # NWIS limit
@@ -188,6 +199,77 @@ def fetch_current(site_ids):
     return out
 
 
+def get_text(url, **params):
+    r = session.get(url, params=params, timeout=60)
+    r.raise_for_status()
+    return r.text
+
+
+def parse_rdb(text):
+    """Rows of a USGS RDB (tab-separated) response as dicts. Comment lines and the column-type line
+    that follows the header are skipped."""
+    rows = [line.split("\t") for line in text.splitlines() if line and not line.startswith("#")]
+    if len(rows) < 2:
+        return []
+    return [dict(zip(rows[0], row)) for row in rows[2:]]
+
+
+def fetch_catalog(site_ids):
+    """What each site has ever measured: {site: [data series rows]} from the USGS site catalog."""
+    catalog = {}
+    for i in range(0, len(site_ids), MAX_SITES_PER_REQUEST):
+        text = get_text(SITE_SERVICE, format="rdb", sites=",".join(site_ids[i:i + MAX_SITES_PER_REQUEST]),
+                        seriesCatalogOutput="true", siteStatus="all")
+        for row in parse_rdb(text):
+            catalog.setdefault(row["site_no"], []).append(row)
+    return catalog
+
+
+def classify_site(rows, now=None):
+    """Say what a site that is not reporting stage is, from its series catalog rows.
+
+    Returns (category, details). Categories: "discharge_only" (reporting flow but no stage),
+    "offline" and "retired" (a stage or flow record that has ended, within or over a year ago),
+    "field_visits", "water_quality", "other", and "no_data". Details (last and first data dates and
+    what was measured) are given for offline and retired gages only.
+    """
+    now = now or datetime.now(timezone.utc)
+    series = [r for r in rows if r.get("data_type_cd") in CONTINUOUS and r.get("end_date")]
+    gage = [r for r in series if r.get("parm_cd") in STAGE_OR_FLOW]
+    if gage:
+        last = max(r["end_date"] for r in gage)
+        first = min((r["begin_date"] for r in gage if r.get("begin_date")), default=last)
+        if any(r["parm_cd"] == "00060" and r["end_date"] >= (now - STALE_AFTER).date().isoformat()
+               for r in gage):
+            return "discharge_only", {}
+        status = "retired" if last < (now - RETIRED_AFTER).date().isoformat() else "offline"
+        measured = sorted({PARAM_NAMES[r["parm_cd"]] for r in series if r.get("parm_cd") in PARAM_NAMES})
+        return status, {"last": last, "first": first, "params": measured}
+    kinds = {r.get("data_type_cd") for r in rows}
+    if "sv" in kinds:
+        return "field_visits", {}
+    if "qw" in kinds:
+        return "water_quality", {}
+    return ("other" if rows else "no_data"), {}
+
+
+def describe_sites(n_sites, n_reporting, counts, retired_count, draw_retired):
+    """The one-line summary printed to stderr: where every site on the river went."""
+    msg = f"{n_sites} sites on river: {n_reporting} reporting stage"
+    if n_sites > n_reporting:
+        msg += f"; {n_sites - n_reporting} not"
+        if counts is None:
+            msg += " (site details unavailable)"
+        else:
+            parts = [f"{counts[key]} {label}" for key, label in CATEGORY_LABELS if counts.get(key)]
+            msg += f" ({', '.join(parts)})" if parts else ""
+            if retired_count and draw_retired:
+                msg += f"; drawing the {retired_count} that no longer report"
+            elif retired_count:
+                msg += f"; --retired draws the {retired_count} that no longer report"
+    return msg
+
+
 def fetch_history(site):
     """Past year of daily gage heights for a site (empty if unavailable).
 
@@ -336,10 +418,28 @@ def pretty_name(name):
     return " ".join(words)
 
 
-def build_gages(anchor, distance_km):
+def build_gages(anchor, distance_km, draw_retired=False):
+    """Return (flowlines, gages, retired). `retired` lists the sites that no longer report stage but
+    once had a stage or flow record; it is only filled in when draw_retired is set."""
     lines, sites = fetch_river(anchor, distance_km)
     current = fetch_current(list(sites))
-    print(f"{len(sites)} sites on river, {len(current)} reporting stage", file=sys.stderr)
+    not_reporting = [s for s in sites if s not in current]
+    counts, retired = None, []
+    if not_reporting:
+        try:
+            catalog = fetch_catalog(not_reporting)
+        except (requests.RequestException, KeyError, ValueError):
+            catalog = None  # the summary line is nicer with it, but nothing depends on it
+        if catalog is not None:
+            counts = {}
+            for site in not_reporting:
+                category, info = classify_site(catalog.get(site, []))
+                counts[category] = counts.get(category, 0) + 1
+                if category in ("retired", "offline"):
+                    name, lat, lon = sites[site]
+                    retired.append({"site": site, "name": pretty_name(name), "lat": lat, "lon": lon,
+                                    "status": category, **info})
+    print(describe_sites(len(sites), len(current), counts, len(retired), draw_retired), file=sys.stderr)
     if not current:
         sys.exit("No gages on this river are reporting recent gage height (parameter 00065).")
 
@@ -367,7 +467,8 @@ def build_gages(anchor, distance_km):
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         gages = list(pool.map(build, current))
-    return lines, sorted(gages, key=lambda g: -g["lat"])
+    retired = sorted(retired, key=lambda g: -g["lat"]) if draw_retired else []
+    return lines, sorted(gages, key=lambda g: -g["lat"]), retired
 
 
 HTML = """<!doctype html>
@@ -400,6 +501,9 @@ HTML = """<!doctype html>
   .mk.dia .gl { transform: rotate(-45deg); }  /* keep the glyph upright inside the rotated square */
   .gl.fast { font-size: 8px; line-height: 6px; }
   .gl.fast i { display: block; font-style: normal; }
+  .rt { width: 10px; height: 10px; border: 2px solid #6b6b6b; border-radius: 50%;
+        background: rgba(255,255,255,.7); }
+  .sw.ret { width: 8px; height: 8px; border: 2px solid #6b6b6b; border-radius: 50%; background: #fff; }
   .modes label { display: block; cursor: pointer; }
   .cap { font-size: 10px; color: #666; }
   .pop table { border-collapse: collapse; }
@@ -413,6 +517,7 @@ HTML = """<!doctype html>
 <script>
 const RIVER = __RIVER__;
 const GAGES = __GAGES__;
+const RETIRED = __RETIRED__;
 const GENERATED = "__GENERATED__";
 const TITLE = __TITLE_JSON__;
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
@@ -470,7 +575,7 @@ const base = {
     {maxZoom: 18, attribution: "Esri, Maxar, Earthstar Geographics"}),
 };
 base["Street (Esri)"].addTo(map);
-L.control.layers(base, null, {position: "topleft"}).addTo(map);
+const layersCtl = L.control.layers(base, null, {position: "topleft"}).addTo(map);
 
 const river = L.geoJSON(RIVER, {style: {color: "#5b8db8", weight: 3, opacity: .8}}).addTo(map);
 const bounds = river.getBounds().isValid() ? river.getBounds()
@@ -512,6 +617,11 @@ function recentSpark(g) {
 
 const signed = (v, d = 2) => { const r = Number(v.toFixed(d)); return (r >= 0 ? "+" : "-") + Math.abs(r).toFixed(d); };
 const ordinal = n => { const s = ["th", "st", "nd", "rd"], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); };
+function since(dateStr, refMs = Date.now()) {
+  const days = Math.floor((refMs - new Date(dateStr).getTime()) / 864e5);
+  return days < 1 ? "today" : days < 60 ? `${days} day${days === 1 ? "" : "s"} ago`
+       : days < 731 ? `${Math.round(days / 30.44)} months ago` : `${Math.floor(days / 365.25)} years ago`;
+}
 function ago(ms, refMs) {
   const h = (refMs - ms) / 36e5;
   return h < 1 / 60 ? "at latest reading" : h < 1 ? `${Math.round(h * 60)} min ago` : h < 48 ? `${Math.round(h)} h ago` : `${(h / 24).toFixed(1)} days ago`;
@@ -561,6 +671,23 @@ function icon(g) {
           `--fc:${g.forecast ? NWS[g.forecast.crest_category][0] : "#fff"}">${glyph}</div></div>`});
 }
 
+function retiredPopup(g) {
+  const status = g.status === "retired" ? "Retired" : "Offline (not reporting stage now)";
+  let rows = `<tr><td>Status</td><td><b>${status}</b></td></tr>
+              <tr><td>Last data</td><td>${esc(g.last)} (${since(g.last)})</td></tr>
+              <tr><td>Record</td><td>${esc(g.first.slice(0, 4))} to ${esc(g.last.slice(0, 4))}</td></tr>`;
+  if (g.params.length) rows += `<tr><td>Measured</td><td>${esc(g.params.join(", "))}</td></tr>`;
+  return `<div class="pop"><b>${esc(g.name)}</b><br>USGS ${esc(g.site)}<table>${rows}</table>
+    <a href="https://waterdata.usgs.gov/monitoring-location/USGS-${esc(g.site)}/" target="_blank">USGS page</a></div>`;
+}
+
+if (RETIRED.length) {
+  const retiredLayer = L.layerGroup(RETIRED.map(g =>
+    L.marker([g.lat, g.lon], {icon: L.divIcon({className: "", iconSize: [14, 14], html: '<div class="rt"></div>'}),
+                              title: g.name, zIndexOffset: -1000}).bindPopup(retiredPopup(g)))).addTo(map);
+  layersCtl.addOverlay(retiredLayer, `Retired or offline (${RETIRED.length})`);
+}
+
 const markers = GAGES.map(g =>
   L.marker([g.lat, g.lon], {icon: icon(g), title: g.name}).bindPopup(popup(g)).addTo(map));
 
@@ -573,6 +700,7 @@ function drawLegend() {
   for (const [, c, n] of MODES[mode].bins) h += `<div><span class="sw dia" style="background:${c}"></span>${n}</div>`;
   h += `<div><span class="sw dia" style="background:${NODATA}"></span>No data</div>`;
   h += "<div style='margin-top:4px'>▲/▼ inside a gage = rising/falling over the last 6 h (double = fast)<br>▬ = steady, none = no trend data</div>";
+  if (RETIRED.length) h += '<div style="margin-top:4px"><span class="sw ret"></span>No longer reporting (retired or offline)</div>';
   legend.getContainer().innerHTML = h;
 }
 legend.onAdd = () => L.DomUtil.create("div", "panel legend");
@@ -597,7 +725,7 @@ modeCtl.addTo(map);
 const title = L.control({position: "topright"});
 title.onAdd = () => {
   const d = L.DomUtil.create("div", "panel");
-  d.innerHTML = `<h4>${esc(TITLE)} stream gages</h4>${GAGES.length} gage${GAGES.length === 1 ? "" : "s"} &middot; generated ${GENERATED}`;
+  d.innerHTML = `<h4>${esc(TITLE)} stream gages</h4>${GAGES.length} gage${GAGES.length === 1 ? "" : "s"}${RETIRED.length ? ` + ${RETIRED.length} no longer reporting` : ""} &middot; generated ${GENERATED}`;
   return d;
 };
 title.addTo(map);
@@ -615,6 +743,8 @@ def main():
     ap.add_argument("--list", action="store_true", help="list candidate gages for the name and exit")
     ap.add_argument("--distance", type=float, default=200,
                     help="miles to navigate each direction (default: %(default)g)")
+    ap.add_argument("--retired", action="store_true",
+                    help="also draw gages that no longer report stage (retired or offline) as faint markers")
     ap.add_argument("--out", default=None, help="output HTML path")
     args = ap.parse_args()
     if not args.river and not args.anchor:
@@ -626,7 +756,7 @@ def main():
     anchor = args.anchor if args.anchor and not args.list else resolve_anchor(
         args.river, args.state, args.list)
     title = args.river or f"USGS {anchor}"
-    lines, gages = build_gages(anchor, round(args.distance * KM_PER_MILE))
+    lines, gages, retired = build_gages(anchor, round(args.distance * KM_PER_MILE), args.retired)
     out = args.out or re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") + "_gages.html"
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -635,9 +765,9 @@ def main():
 
     values = {"TITLE": html.escape(title), "TITLE_JSON": safe_json(title),
               "RIVER": safe_json({"type": "FeatureCollection", "features": lines}),
-              "GAGES": safe_json(gages), "GENERATED": generated}
+              "GAGES": safe_json(gages), "RETIRED": safe_json(retired), "GENERATED": generated}
     # one pass, so text inside a substituted value can never be mistaken for a placeholder
-    page = re.sub(r"__(TITLE_JSON|TITLE|RIVER|GAGES|GENERATED)__", lambda m: values[m.group(1)], HTML)
+    page = re.sub(r"__(TITLE_JSON|TITLE|RIVER|GAGES|RETIRED|GENERATED)__", lambda m: values[m.group(1)], HTML)
     with open(out, "w", encoding="utf-8") as f:
         f.write(page)
     print(f"Wrote {out}", file=sys.stderr)
@@ -649,6 +779,10 @@ def main():
         r = g["recent"]
         trend = f"{r['rate']:+.3f} ft/h" if r and r["rate"] is not None else "n/a"
         print(f"{g['site']}  {g['stage']:7.2f} ft  {info:9s} {trend:>11s}  {g['name']}")
+    if retired:
+        print(f"\nNo longer reporting stage ({len(retired)}):")
+        for r in retired:
+            print(f"{r['site']}  last data {r['last']}  {r['status']:<8s} {r['name']}")
 
 
 if __name__ == "__main__":
