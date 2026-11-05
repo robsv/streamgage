@@ -21,9 +21,17 @@ ruff = ">=0.16.7,<0.17"
 [feature.lint.tasks]
 lint = { cmd = "ruff check .", description = "Lint the codebase with ruff" }
 
+[feature.test.dependencies]
+pytest = ">=8,<10"
+nodejs = ">=20"  # runs the page's JavaScript logic tests; they skip when node is missing
+
+[feature.test.tasks]
+test = { cmd = "pytest -q", description = "Run the tests (no network needed)" }
+
 [feature.py310.dependencies]
 python = "3.10.*"  # the oldest supported version, so CI can prove the claim
 
 [environments]
-py310 = { features = ["py310"] }
+py310 = { features = ["py310", "test"] }
+test = { features = ["test"] }
 lint = { features = ["lint"], no-default-feature = true }

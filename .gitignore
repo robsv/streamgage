@@ -4,6 +4,7 @@ __pycache__/
 
 # Tooling caches
 .ruff_cache/
+.pytest_cache/
 
 # pixi environments
 .pixi/*
