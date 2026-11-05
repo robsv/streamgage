@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+
+# Tooling caches
+.ruff_cache/
+
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# macOS
+.DS_Store
+
+# Generated maps and the screenshots made while checking them
+*_gages.html
+map.png
+
+# Secrets
+.env

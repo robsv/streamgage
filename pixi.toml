@@ -1,0 +1,29 @@
+[workspace]
+authors = ["Rob Svirskas"]
+channels = ["conda-forge"]
+description = "Interactive map of a river with USGS stream gages colored by current stage"
+license = "BSD-3-Clause"
+name = "streamgage"
+platforms = ["osx-arm64", "osx-64", "linux-64"]
+version = "0.1.0"
+
+[dependencies]
+python = ">=3.10"
+requests = ">=2.34.2,<3"
+
+[tasks.map]
+cmd = "python streamgage.py"
+description = "Draw a river map, e.g. pixi run map \"Peace River\""
+
+[feature.lint.dependencies]
+ruff = ">=0.16.7,<0.17"
+
+[feature.lint.tasks]
+lint = { cmd = "ruff check .", description = "Lint the codebase with ruff" }
+
+[feature.py310.dependencies]
+python = "3.10.*"  # the oldest supported version, so CI can prove the claim
+
+[environments]
+py310 = { features = ["py310"] }
+lint = { features = ["lint"], no-default-feature = true }
