@@ -85,6 +85,83 @@ equal(ago(ref - 5 * 36e5, ref), "5 h ago", "5 hours");
 equal(ago(ref - 47 * 36e5, ref), "47 h ago", "47 hours");
 equal(ago(ref - 72 * 36e5, ref), "3.0 days ago", "3 days");
 
+// ---- "since": how long ago the last data was ----------------------------------------------
+const noon = Date.parse("2026-11-05T12:00:00Z");
+const back = n => new Date(noon - n * 864e5).toISOString().slice(0, 10);
+equal(since(back(0), noon), "today", "since today");
+equal(since(back(1), noon), "1 day ago", "since 1 day");
+equal(since(back(10), noon), "10 days ago", "since 10 days");
+equal(since(back(59), noon), "59 days ago", "since 59 days");
+equal(since(back(60), noon), "2 months ago", "since 60 days");
+equal(since(back(365), noon), "12 months ago", "since a year");
+equal(since(back(730), noon), "24 months ago", "since 730 days is still months");
+equal(since(back(731), noon), "2 years ago", "since 731 days is two years, never 1 years");
+equal(since(back(1100), noon), "3 years ago", "since three years");
+equal(since("2005-09-29", noon), "21 years ago", "since 2005");
+for (let n = 0; n < 9000; n += 7) check(!/^1 years|^0 /.test(since(back(n), noon)), `bad wording at ${n} days`);
+
+// ---- the gage popup: escaping, and no "undefined" or "NaN" for any combination of data -----
+const stages = {action: 9, minor: 11, moderate: 14, major: 16};
+const recent = (over = {}) => ({low: 1, high: 3, peak: 3, peak_time: noon - 2 * 36e5, range_pos: 80,
+                                rate: 0.05, delta24: 0.4, series: [[noon - 36e5, 2.5], [noon, 3]], ...over});
+const base = {site: "02297345", name: "Peace River At Platt FL", stage: 2.89,
+              time: "2026-11-05T12:00:00.000-05:00", method: "percentile", pct: 41, recent: recent()};
+const forecastG = {...base, method: "nws", category: "minor", stages, lid: "ARCF1", pct: undefined,
+                   forecast: {issued: "2026-11-05T12:00:00Z", crest: 16.5, crest_category: "major",
+                              crest_time: "2026-11-06T00:00:00Z",
+                              series: [["2026-11-05T18:00:00Z", 16], ["2026-11-06T00:00:00Z", 16.5]]}};
+const variants = {
+  "diamond": base,
+  "nws with forecast": forecastG,
+  "nws without forecast": {...forecastG, forecast: null},
+  "no recent stats": {...base, recent: null},
+  "no trend": {...base, recent: recent({rate: null})},
+  "flat range": {...base, recent: recent({range_pos: null, low: 2, high: 2})},
+  "no 24 h change": {...base, recent: recent({delta24: null})},
+  "no percentile": {...base, pct: null},
+  "one-point series": {...base, recent: recent({series: [[noon, 3]]})},
+};
+for (const [name, g] of Object.entries(variants)) {
+  const html = popup(g);
+  check(!/undefined|NaN|Infinity|\[object|>null</.test(html), `popup (${name}) shows a bad value`);
+  check(html.includes("USGS 02297345"), `popup (${name}) names the site`);
+}
+check(popup(base).includes("41st percentile"), "popup shows the ordinal percentile");
+check(popup(variants["no recent stats"]).includes("too few readings"), "popup explains missing stats");
+check(popup(variants["no percentile"]).includes("n/a (short record)"), "popup explains a missing percentile");
+check(popup(forecastG).includes("Forecast crest"), "popup shows the forecast crest");
+check(popup(forecastG).includes("water.noaa.gov/gauges/ARCF1"), "popup links the NWS gauge");
+
+const evilGage = {...forecastG, site: '1"><img src=x onerror=alert(1)>', name: "<script>alert(1)</script>",
+                  lid: '"><svg onload=alert(1)>'};
+const evilHtml = popup(evilGage);
+// the sparkline is a real <svg> element, so look for the attacker's own markup, not any <svg
+check(!evilHtml.includes("<img") && !evilHtml.includes("<script>") && !evilHtml.includes("<svg onload"),
+      "popup escapes hostile site, name and lid");
+// drop quoted attribute values (escaped text inside them is harmless), then look for a live handler
+const withoutValues = evilHtml.replace(/"[^"]*"/g, '""');
+check(!/<[a-z][^>]*\son[a-z]+\s*=/i.test(withoutValues), "no injected event handler is live");
+check(/<[a-z][^>]*\son[a-z]+\s*=/i.test('<img src=x onerror=alert(1)>'), "the handler check itself works");
+check(evilHtml.includes("&lt;script&gt;"), "hostile name is shown as text");
+
+// ---- the retired-gage popup ---------------------------------------------------------------
+const retiredG = {site: "02298300", name: "Peace River At Punta Gorda FL", status: "retired",
+                  last: "2005-09-29", first: "2002-09-30", params: ["stage", "water temperature"]};
+const popupHtml = retiredPopup(retiredG);
+check(popupHtml.includes("<b>Retired</b>"), "retired status shown");
+check(popupHtml.includes("2005-09-29") && popupHtml.includes("years ago"), "last data and how long ago");
+check(popupHtml.includes("2002 to 2005"), "record span");
+check(popupHtml.includes("stage, water temperature"), "what was measured");
+check(popupHtml.includes("USGS-02298300"), "link to the USGS page");
+check(retiredPopup({...retiredG, status: "offline"}).includes("Offline (not reporting stage now)"),
+      "offline status shown");
+check(!retiredPopup({...retiredG, params: []}).includes("Measured"), "no empty Measured row");
+const hostile = retiredPopup({site: '1"><img src=x onerror=alert(1)>', name: "<script>alert(1)</script>",
+                              status: "retired", last: "2005-09-29", first: "2002-09-30",
+                              params: ["<b>x</b>"]});
+check(!hostile.includes("<img") && !hostile.includes("<script>") && !hostile.includes("<b>x"),
+      "retired popup escapes hostile fields");
+
 equal(esc("<img src=x onerror=alert(1)>"), "&lt;img src=x onerror=alert(1)&gt;", "esc tags");
 equal(esc(`"quote" & 'apos'`), "&quot;quote&quot; &amp; &#39;apos&#39;", "esc quotes and ampersand");
 equal(esc(42), "42", "esc coerces numbers");

@@ -36,13 +36,15 @@ def river(monkeypatch, route):
     monkeypatch.setattr(sg, "fetch_forecast", lambda lid, stages: {
         "issued": "x", "series": [], "crest": 16.5, "crest_time": "t", "crest_category": "major"})
     monkeypatch.setattr(sg, "fetch_history", lambda site: [float(i) / 10 for i in range(40)])
+    monkeypatch.setattr(sg, "fetch_catalog", lambda ids: {})
     return route({sg.NWPS: {"gauges": [{"lid": "ARCF1"}]}})
 
 
 class TestBuildGages:
     def test_assembles_nws_and_percentile_gages(self, river):
-        lines, gages = sg.build_gages("02298300", 322)
+        lines, gages, retired = sg.build_gages("02298300", 322)
         assert lines == [{"line": 1}]
+        assert retired == []
         by_site = {g["site"]: g for g in gages}
         arcadia, platt = by_site["02296750"], by_site["02297345"]
 
@@ -102,7 +104,7 @@ class TestMainOutput:
     def test_writes_a_page_that_embeds_the_data(self, make_page):
         gages = [gage(), gage("02296750", "Peace River At SR 70 At Arcadia, FL")]
         page = make_page(gages, lines=[{"type": "Feature", "properties": {}}])
-        embedded = json.loads(re.search(r"const GAGES = (.*?);\nconst GENERATED", page, re.DOTALL)[1])
+        embedded = json.loads(re.search(r"const GAGES = (.*?);\nconst RETIRED", page, re.DOTALL)[1])
         assert embedded == gages
         river = json.loads(re.search(r"const RIVER = (.*?);\nconst GAGES", page, re.DOTALL)[1])
         assert river == {"type": "FeatureCollection",
@@ -122,7 +124,7 @@ class TestMainOutput:
         evil = "</script><img src=x onerror=alert(1)>"
         page = make_page([gage(name=evil)])
         assert page.count("</script>") == sg.HTML.count("</script>")
-        embedded = json.loads(re.search(r"const GAGES = (.*?);\nconst GENERATED", page, re.DOTALL)[1])
+        embedded = json.loads(re.search(r"const GAGES = (.*?);\nconst RETIRED", page, re.DOTALL)[1])
         assert embedded[0]["name"] == evil  # still exact once parsed
 
     def test_hostile_title_is_escaped(self, make_page):
@@ -133,7 +135,7 @@ class TestMainOutput:
 
     def test_placeholder_text_inside_a_name_is_not_substituted(self, make_page):
         page = make_page([gage(name="__TITLE__ __GENERATED__")])
-        embedded = json.loads(re.search(r"const GAGES = (.*?);\nconst GENERATED", page, re.DOTALL)[1])
+        embedded = json.loads(re.search(r"const GAGES = (.*?);\nconst RETIRED", page, re.DOTALL)[1])
         assert embedded[0]["name"] == "__TITLE__ __GENERATED__"
 
 
@@ -185,9 +187,9 @@ class TestCommandLine:
                 raise SystemExit(0)
             return "01234567"
 
-        def build(anchor, km):
-            seen["anchor"], seen["distance"] = anchor, km
-            return [], [gage()]
+        def build(anchor, km, draw=False):
+            seen["anchor"], seen["distance"], seen["draw_retired"] = anchor, km, draw
+            return [], [gage()], []
 
         monkeypatch.setattr(sg, "resolve_anchor", resolve)
         monkeypatch.setattr(sg, "build_gages", build)

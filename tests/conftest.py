@@ -24,17 +24,17 @@ def fixture():
 
 @pytest.fixture
 def route(monkeypatch):
-    """Replace sg.get_json with a router, so code under test never touches the network.
+    """Replace sg.get_json and sg.get_text with a router, so code under test never uses the network.
 
     Call route({"substring": response, ...}). A request goes to the response whose key is the
-    longest substring of the URL. A response can be a dict or list (returned as is), an
+    longest substring of the URL. A response can be a dict, list or string (returned as is), an
     exception (raised), or a callable taking the request params. Any unrouted request fails the
     test. The returned list records every (url, params) request made.
     """
     def install(routes):
         calls = []
 
-        def fake_get_json(url, **params):
+        def fake_get(url, **params):
             calls.append((url, params))
             for key in sorted(routes, key=len, reverse=True):
                 if key in url:
@@ -44,7 +44,8 @@ def route(monkeypatch):
                     return resp(params) if callable(resp) else resp
             raise AssertionError(f"unexpected request: {url} {params}")
 
-        monkeypatch.setattr(sg, "get_json", fake_get_json)
+        monkeypatch.setattr(sg, "get_json", fake_get)
+        monkeypatch.setattr(sg, "get_text", fake_get)  # RDB (tab-separated) responses
         return calls
     return install
 
@@ -53,13 +54,13 @@ def route(monkeypatch):
 def make_page(monkeypatch, tmp_path):
     """Render a real page through sg.main() with the network stages stubbed out.
 
-    make_page(gages, title="Peace River", lines=()) returns the HTML text. Use it to test
-    what the tool writes, not just the functions behind it.
+    make_page(gages, title="Peace River", lines=(), retired=()) returns the HTML text. Use it to
+    test what the tool writes, not just the functions behind it.
     """
-    def render(gages, title="Peace River", lines=(), extra_args=()):
+    def render(gages, title="Peace River", lines=(), retired=(), extra_args=()):
         out = tmp_path / "page.html"
         monkeypatch.setattr(sg, "resolve_anchor", lambda *a, **k: "01234567")
-        monkeypatch.setattr(sg, "build_gages", lambda anchor, km: (list(lines), gages))
+        monkeypatch.setattr(sg, "build_gages", lambda anchor, km, draw=False: (list(lines), gages, list(retired)))
         monkeypatch.setattr("sys.argv", ["streamgage.py", title, "--out", str(out), *extra_args])
         sg.main()
         return out.read_text(encoding="utf-8")
@@ -73,5 +74,14 @@ def gage(site="02297345", name="Peace River At Platt FL", **overrides):
             "recent": {"low": -0.77, "high": 2.89, "peak": 2.89, "peak_time": 1793840400000,
                        "range_pos": 100.0, "rate": 0.008277, "delta24": 1.48,
                        "series": [[1793836800000, 2.5], [1793840400000, 2.89]]}}
+    base.update(overrides)
+    return base
+
+
+def retired_gage(site="02298300", name="Peace River At Punta Gorda FL", **overrides):
+    """A retired-gage dict shaped like build_gages() output for a site that no longer reports."""
+    base = {"site": site, "name": name, "lat": 26.95, "lon": -82.05, "status": "retired",
+            "last": "2005-09-29", "first": "2002-09-30",
+            "params": ["specific conductance", "stage", "water temperature"]}
     base.update(overrides)
     return base
