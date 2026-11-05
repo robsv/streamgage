@@ -326,7 +326,9 @@ default, USGS if you choose USGS Topo). Those hosts see the area you view.
 
 ```
 streamgage.py   the whole tool: data fetching, the HTML page template, and the command line
+tests/          pytest suite; tests/fixtures holds trimmed real USGS and NWS responses
 pixi.toml       environment and tasks
+pytest.ini      test settings
 ruff.toml       lint settings
 docs/           the sample images used in this README
 .github/        CI workflow and Dependabot settings
@@ -335,16 +337,25 @@ LICENSE         BSD 3-Clause
 
 ```
 pixi run map "Peace River"      # draw a map
+pixi run -e test test           # or: python3 -m pytest -q  (needs pytest; no network)
 pixi run -e lint lint           # or: ruff check .  (settings in ruff.toml)
+pixi run -e py310 test          # the same tests on Python 3.10, the oldest supported
 ```
 
-GitHub Actions runs the lint and a start-up check on Ubuntu and macOS, plus a start-up check on
-Python 3.10 (the oldest supported), for every push to `main` and every pull request that changes more
-than docs.
+GitHub Actions runs the lint and the tests on Ubuntu and macOS, plus the tests on Python 3.10 (the
+oldest supported), for every push to `main` and every pull request that changes more than docs.
 
 - The tool is one file with `requests` as its only dependency. The HTML page is a template string
   inside it, and the page data is embedded as JSON, so each output file is self-contained apart from
   Leaflet and the tiles. The `lint` environment is separate, so ruff is not installed for normal runs.
+- **Tests** never touch the network. `tests/fixtures` holds real responses, trimmed to a few days:
+  daily values for a site with a daily mean, one with only a daily max and min, and one with all
+  three; two days of instantaneous values; and an NWS gauge record. Everything else a test needs is
+  built in the test. A router fixture (`route` in `tests/conftest.py`) replaces `get_json`, and any
+  request a test did not expect fails it. The page's JavaScript logic (marker colors, trend bins,
+  number formatting) runs under Node from `tests/page_logic.js`; those tests skip when Node is not
+  installed, and the pixi `test` environment provides it. To record a new fixture, fetch the
+  response from the service, trim the long arrays, and save it as JSON.
 - Generated maps (`*_gages.html`) are ignored by git.
 - Tunable constants are at the top of the file: `STALE_AFTER` (3 days), `MATCH_RADIUS_KM` (0.5),
   `KM_PER_MILE`, `MAX_SITES_PER_REQUEST` (100, the NWIS limit), `RECENT_DAYS` (7), `TREND_HOURS` (6),
@@ -422,8 +433,10 @@ cause is that the Leaflet script from unpkg is blocked or unreachable.
   line can run past its mouth.
 - **Browser needed for the map tiles.** Opening the HTML from disk works, but the basemap provider
   must allow requests from `file://` pages (see Troubleshooting).
-- **No automated tests yet.** CI checks lint and that the script starts; the data handling has been
-  checked by hand against live services.
+- **What the tests don't cover.** They use recorded responses, so they can't notice a service
+  changing its format; the live services are checked by running the tool. The page is tested as
+  logic under Node, not rendered in a browser, so layout (marker overlap, the glyphs inside the
+  markers, the legend) is checked by eye.
 
 ## Possible future work
 
@@ -435,7 +448,7 @@ cause is that the Leaflet script from unpkg is blocked or unreachable.
 - Discharge-only gages, and a percentile that uses longer records (the USGS statistics service has
   them).
 - Trend thresholds scaled to each gage's own typical rate of change.
-- Unit tests with recorded API responses.
+- Browser-level tests that render the page and check the markers and popups.
 
 ## Attribution
 
