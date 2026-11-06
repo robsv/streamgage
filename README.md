@@ -65,8 +65,8 @@ minutes earlier and has levelled off:
 All three images are snapshots from 2026-11-05 (3:22 pm EST), made with
 `python3 streamgage.py "Peace River" --state FL` and a headless-Chrome screenshot.
 
-The same river at four moments of the storm, from the first rise to the crest, is on its own page:
-[Arcadia, November 2026: a storm in four frames](docs/arcadia-nov-2026.md).
+The same river at six moments of the storm, from the first rise to the crest, is on its own page:
+[Arcadia, November 2026: a storm in six frames](docs/arcadia-nov-2026.md).
 
 ## 1. Set up
 
@@ -358,7 +358,7 @@ The USGS keeps instantaneous readings for months (a request for five months back
 storms are easy to revisit. For a moment far enough back that no gage has readings, the tool says that
 no gage was reporting stage. To find a moment worth showing, look at a gage's readings on its USGS page,
 or run the tool at a few times and compare. For an example, see
-[Arcadia, November 2026: a storm in four frames](docs/arcadia-nov-2026.md), which uses four moments of one flood.
+[Arcadia, November 2026: a storm in six frames](docs/arcadia-nov-2026.md), which uses six moments of one flood.
 
 ### Basemaps
 
