@@ -194,7 +194,7 @@ check(/<[a-z][^>]*\son[a-z]+\s*=/i.test('<img src=x onerror=alert(1)>'), "the ha
 check(evilHtml.includes("&lt;script&gt;"), "hostile name is shown as text");
 
 // ---- cresting: strict on purpose --------------------------------------------------------------
-// a gage whose stage has levelled off just past its 7-day high. `age` is how many hours ago the peak was.
+// a gage whose stage has leveled off just past its 7-day high. `age` is how many hours ago the peak was.
 const crestG = (over = {}, age = 0.8) => ({
   site: "02296750", name: "Peace River At SR 70 At Arcadia, FL", stage: 16.2,
   method: "percentile", time: new Date(noon).toISOString(), longterm: null, pct: null,

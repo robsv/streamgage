@@ -49,7 +49,7 @@ the 6-hour trend; the wave on Arcadia means it is cresting.
 ![Map of the Peace River, Florida, with 16 USGS gages as colored markers along the river, a wave symbol on the purple Arcadia marker, a "Color diamonds by" control at the left and a flood-category legend at the lower right](docs/peace-river-map.png)
 
 The same map in the "Percentile for this date (all years)" coloring. The yearly percentile reads 99 or
-100 for every one of these gages, but against every past year's values for this date, the magenta
+100 for nearly every one of these gages, but against every past year's values for this date, the magenta
 diamonds are higher than anything on record for the date, and the others fall in the blue bands:
 
 ![The Peace River map colored by percentile for this date: five diamonds are magenta, meaning above the record for the date, and the rest are shades of blue; the legend lists six bins and a wave symbol for cresting](docs/peace-river-date-mode.png)
@@ -58,14 +58,15 @@ Clicking a gage opens its popup: the stage, the 6-hour trend, the 24-hour change
 and peak, how the stage compares with the same date in every past year, and a 7-day sparkline. Here
 is Peace River at Arcadia, in major flood, which is higher than any value in 95 years of records for
 this date (the previous high was 8.57 ft in 2006). Its trend row says "Cresting": the stage peaked 45
-minutes earlier and has levelled off:
+minutes earlier and has leveled off:
 
 ![Popup for Peace River at Arcadia, FL: stage 16.21 ft in major flood, trend "Cresting" at +0.018 ft/h with the peak 45 minutes earlier, above the record for Nov 5 (previous high 8.57 ft in 2006, 95 years of record), with the NWS flood stages, a 7-day sparkline and the NWS forecast chart](docs/peace-river-popup.png)
 
 All three images are snapshots from 2026-11-05 (3:22 pm EST), made with
 `python3 streamgage.py "Peace River" --state FL` and a headless-Chrome screenshot.
 
-The same river at six moments of the storm, from the first rise to the crest, is on its own page:
+The same river at six moments of the storm, from the first rise to Arcadia cresting in major flood, is
+on its own page:
 [Arcadia, November 2026: a storm in six frames](docs/arcadia-nov-2026.md).
 
 ## 1. Set up
@@ -199,7 +200,7 @@ number, the date of its last data, whether it is `retired` or `offline`, and its
 This split exists because a raw stage number means little across gages. Datums differ, so one gage
 may read 13 ft in flood while another reads 97 ft because its zero point is an elevation above sea
 level. NWS publishes flood thresholds for only some gages. Where it does, the map uses them. Where it
-doesn't, the map says how high the river is relative to that gage's own recent history.
+doesn't, the map says how high the river is relative to that gage's own history.
 
 ### Circle colors: NWS flood category
 
@@ -217,7 +218,7 @@ The "Color diamonds by" control at the top left switches between three views. Ci
 
 **Position in 7-day range (default).** Where the current stage sits between the lowest and highest
 reading of the last 7 days. 100% means the gage is at its peak right now, and a drop from 100%
-means it has crested. Unlike the yearly percentile, it doesn't saturate during a flood. Gray when the
+means it has crested. Unlike a percentile over the past year, it doesn't saturate during a flood. Gray when the
 range is under 0.1 ft or there are too few readings.
 
 | Color | Position |
@@ -240,8 +241,8 @@ range is under 0.1 ft or there are too few readings.
 
 **Percentile for this date (all years).** Where the current stage falls among the values for this same
 calendar day in every year on record. On November 5, the 90th percentile means the stage is higher than
-on about 90% of past November 5ths. It uses the USGS daily statistics, which cover as many as 90 or
-more years for some gages, and the popup says how many years and gives the median and record for the
+on about 90% of past November 5ths. It uses the USGS daily statistics, which go back more than 90
+years for some gages, and the popup says how many years and gives the median and record for the
 date. A stage higher than every past value for the date gets its own color, so a flood doesn't just
 pile up at "100".
 
@@ -266,7 +267,7 @@ Every gage with a trend gets a glyph inside its marker, whichever color mode is 
 ▼ falling, doubled when the rate is faster than 0.10 ft/h, and ▬ steady. No glyph means no trend could
 be computed: too few readings, or the newest reading is more than 3 hours old.
 
-A wave (a crest followed by a trough) replaces the ▬ on a gage that is **cresting**: its stage has levelled
+A wave (a crest followed by a trough) replaces the ▬ on a gage that is **cresting**: its stage has leveled
 off just past its 7-day high. To count, a gage must be steady (within 0.02 ft/h over the last 6 hours),
 in the top 5% of its 7-day range, and its 7-day peak must already be behind it: at least 15 minutes ago
 and no more than 6 hours ago.
@@ -310,7 +311,7 @@ so on), and the link to its USGS page.
 
 ### Sites that are not on the map
 
-"45 sites on river, 16 reporting stage" can look as if 29 gages are broken. They are not: the count
+"45 sites on river: 16 reporting stage; 29 not" can look as if 29 gages are broken. They are not: the count
 is every USGS location in the river's network, and most of those are not live gages. For each site that
 is not reporting stage, the script reads its USGS site catalog (what the site has ever measured, and
 when) and sorts it:
@@ -358,7 +359,8 @@ The USGS keeps instantaneous readings for months (a request for five months back
 storms are easy to revisit. For a moment far enough back that no gage has readings, the tool says that
 no gage was reporting stage. To find a moment worth showing, look at a gage's readings on its USGS page,
 or run the tool at a few times and compare. For an example, see
-[Arcadia, November 2026: a storm in six frames](docs/arcadia-nov-2026.md), which uses six moments of one flood.
+[Arcadia, November 2026: a storm in six frames](docs/arcadia-nov-2026.md), which uses six moments of
+one flood.
 
 ### Basemaps
 
@@ -452,7 +454,7 @@ USGS and the thresholds and forecasts from NOAA.
 ## Privacy
 
 Nothing is uploaded and there is no account. The script sends the river name (and `--state`) to the
-USGS monitoring-locations service; USGS site numbers and the walk distance to USGS NLDI and NWIS; and
+USGS monitoring-locations service; USGS site numbers and the walk distance (and, with `--as-of`, the time window) to USGS NLDI and NWIS; and
 the bounding box of the gages it found, plus NWS gauge ids, to NOAA. Every host also sees your IP
 address and the User-Agent `streamgage-map/1.0`.
 
@@ -481,7 +483,8 @@ pixi run -e py310 test          # the same tests on Python 3.10, the oldest supp
 ```
 
 GitHub Actions runs the lint and the tests on Ubuntu and macOS, plus the tests on Python 3.10 (the
-oldest supported), for every push to `main` and every pull request that changes more than docs.
+oldest supported), for every push to `main` and every pull request, except those that change only Markdown files or
+the license.
 
 - The tool is one file with `requests` as its only dependency. The HTML page is a template string
   inside it, and the page data is embedded as JSON, so each output file is self-contained apart from

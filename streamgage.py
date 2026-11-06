@@ -726,7 +726,7 @@ function color(g) {
   return b ? b[1] : NODATA;
 }
 
-// "Cresting": the stage has levelled off just past its 7-day high. Strict on purpose: the peak must
+// "Cresting": the stage has leveled off just past its 7-day high. Strict on purpose: the peak must
 // already be behind us, so a gage still setting new highs is not called cresting. It is only a glyph;
 // the trend color stays "steady".
 const STEADY_BAND = 0.02;        // ft/h: the edge of the "steady" trend bin
@@ -760,7 +760,7 @@ function glyphFor(g) {
     : `<span class="gl">${chars[0]}</span>`;
 }
 const crestLegendLine = () => `<div style="margin-top:2px"><span class="crest-sw">${crestSvg(14, 9)}</span>` +
-                              `= at its crest: just past its 7-day high, levelling off</div>`;
+                              `= at its crest: just past its 7-day high, leveling off</div>`;
 
 const map = L.map("map");
 const base = {
