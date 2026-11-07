@@ -289,6 +289,28 @@ const hostile = retiredPopup({site: '1"><img src=x onerror=alert(1)>', name: "<s
 check(!hostile.includes("<img") && !hostile.includes("<script>") && !hostile.includes("<b>x"),
       "retired popup escapes hostile fields");
 
+// ---- confluence popup ---------------------------------------------------------------------
+const cf = (rivers, nearest) => ({lat: 40.9, lon: -80, rivers, nearest});
+const near = (river, site, name, km) => ({river, site, name, km});
+check(confluencePopup(cf(["Shenango River", "Mahoning River", "Beaver River"], []))
+        .includes("Shenango River, Mahoning River and Beaver River meet here."), "three rivers are listed with a final 'and'");
+check(confluencePopup(cf(["Peace River", "Horse Creek"], [])).includes("Peace River and Horse Creek meet here."),
+      "two rivers are joined with 'and'");
+check(confluencePopup(cf(["Peace River"], [])).includes("Peace River meet here."), "a lone name is still shown");
+check(confluencePopup(cf(["A", "B"], [])).includes("River confluence"), "the popup has a heading");
+check(!confluencePopup(cf(["A", "B"], [])).includes("Nearest gage"), "no nearest-gage table when none were found");
+check(!confluencePopup({lat: 1, lon: 2, rivers: ["A", "B"]}).includes("Nearest gage"),
+      "a confluence without a nearest list does not break the popup");
+const withGages = confluencePopup(cf(["A", "B"], [near("A", "02297345", "Peace River At Platt FL", 1.8),
+                                                  near("B", "02297310", "Horse Creek Near Myakka FL", 11.3)]));
+check(withGages.includes("Nearest gage on each") && withGages.includes("Peace River At Platt FL"), "nearest gages are listed");
+check(withGages.includes("USGS 02297345, 1.8 km away") && withGages.includes("USGS 02297310, 11.3 km away"),
+      "each nearest gage shows its site and distance");
+const hostileCf = confluencePopup(cf(['<img src=x onerror=alert(1)>', "<script>alert(1)</script>"],
+                                     [near("<b>x</b>", '1"><i>', "<script>y</script>", 1)]));
+check(!hostileCf.includes("<img") && !hostileCf.includes("<script>") && !hostileCf.includes("<b>x") && !hostileCf.includes("<i>"),
+      "confluence popup escapes hostile river and gage names");
+
 equal(esc("<img src=x onerror=alert(1)>"), "&lt;img src=x onerror=alert(1)&gt;", "esc tags");
 equal(esc(`"quote" & 'apos'`), "&quot;quote&quot; &amp; &#39;apos&#39;", "esc quotes and ampersand");
 equal(esc(42), "42", "esc coerces numbers");

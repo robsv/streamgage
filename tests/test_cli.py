@@ -12,6 +12,11 @@ from tests.conftest import gage
 STAGES = {"action": 9, "minor": 11, "moderate": 14, "major": 16}
 
 
+def http_error(status):
+    """The error requests raises for a response with this status."""
+    return sg.requests.HTTPError(f"{status} error", response=type("Resp", (), {"status_code": status})())
+
+
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -79,6 +84,39 @@ class TestBuildGages:
         assert params["bbox.ymin"] == pytest.approx(27.09 - 0.02)
         assert params["bbox.ymax"] == pytest.approx(27.22 + 0.02)
         assert params["srid"] == "EPSG_4326"
+
+    def test_if_the_nws_stays_rate_limited_the_river_is_drawn_without_flood_stages(
+            self, river, route, monkeypatch, capsys):
+        route({sg.NWPS: http_error(429)})
+        monkeypatch.setattr(sg, "fetch_nws", lambda site, lat, lon, gauges: None)  # as with no gauges
+        _, gages, _ = sg.build_gages("anchor", 322)
+        assert {g["site"]: g["method"] for g in gages} == {"02296750": "percentile", "02297345": "percentile"}
+        assert "NWS flood stages unavailable" in capsys.readouterr().err
+
+    def test_after_one_refusal_the_nws_is_not_asked_again(self, river, route, monkeypatch, capsys):
+        calls = route({sg.NWPS: http_error(429)})
+        monkeypatch.setattr(sg, "fetch_nws", lambda site, lat, lon, gauges: None)
+        sg.build_gages("anchor", 322)
+        sg.build_gages("anchor", 322)
+        assert len(calls) == 1  # the second river went straight to the fallback
+        assert capsys.readouterr().err.count("NWS flood stages unavailable") == 1
+
+    @pytest.mark.parametrize("error", [http_error(404), http_error(400), sg.requests.ConnectionError("down"),
+                                       sg.requests.Timeout("slow")])
+    def test_other_nws_errors_are_not_mistaken_for_rate_limiting(self, river, route, monkeypatch, error):
+        route({sg.NWPS: error})
+        with pytest.raises(sg.requests.RequestException):
+            sg.build_gages("anchor", 322)
+        assert sg.nws_state["down"] is False  # one bad answer must not switch the NWS off for later rivers
+
+    @pytest.mark.parametrize("status", [429, 502, 503, 504])
+    def test_busy_service_statuses_count_as_refusals(self, status):
+        assert sg.is_refusal(http_error(status))
+
+    @pytest.mark.parametrize("error", [http_error(500), http_error(404), sg.requests.ConnectionError("x"),
+                                       sg.requests.HTTPError("no response attached")])
+    def test_nothing_else_counts_as_a_refusal(self, error):
+        assert not sg.is_refusal(error)
 
     def test_gages_not_reporting_are_left_out(self, river, monkeypatch):
         monkeypatch.setattr(sg, "fetch_current", lambda ids, as_of=None: {"02297345": (2.89, now_iso())})
