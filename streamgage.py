@@ -30,8 +30,8 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from itertools import combinations
 from datetime import datetime, timedelta, timezone
+from itertools import combinations
 
 import requests
 

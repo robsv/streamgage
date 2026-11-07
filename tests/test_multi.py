@@ -213,7 +213,7 @@ def stubbed(monkeypatch):
 
 class TestBuildRivers:
     def test_one_river_is_just_build_gages(self, stubbed):
-        lines, gages, retired, confluences = sg.build_rivers(["A"], ["A"], 322)
+        _, gages, _, confluences = sg.build_rivers(["A"], ["A"], 322)
         assert stubbed == ["A"] and confluences == []
         assert len(gages) == 2
 
@@ -233,7 +233,7 @@ class TestBuildRivers:
         assert [n["site"] for n in confluences[0]["nearest"]] == ["SHARED01", "SHARED01"]
 
     def test_a_river_with_nothing_to_show_is_skipped_with_a_warning(self, stubbed, capsys):
-        lines, gages, _, confluences = sg.build_rivers(["A", "EMPTY", "B"], ["A", "Dry Creek", "B"], 322)
+        _, _, _, confluences = sg.build_rivers(["A", "EMPTY", "B"], ["A", "Dry Creek", "B"], 322)
         assert "skipping Dry Creek" in capsys.readouterr().err
         assert len(confluences) == 1 and confluences[0]["rivers"] == ["A", "B"]
 
@@ -262,7 +262,7 @@ class TestBuildRivers:
         def boom(anchor, km):
             raise requests.ConnectionError("nldi down")
         monkeypatch.setattr(sg, "fetch_paths", boom)
-        lines, gages, _, confluences = sg.build_rivers(["A", "B"], ["A", "B"], 322)
+        _, gages, _, confluences = sg.build_rivers(["A", "B"], ["A", "B"], 322)
         assert confluences == [] and len(gages) == 3
         assert "Could not look for confluences" in capsys.readouterr().err
 
@@ -275,7 +275,7 @@ class TestBuildRivers:
             return real(anchor, *a, **k)
 
         monkeypatch.setattr(sg, "build_gages", flaky)
-        lines, gages, _, confluences = sg.build_rivers(["A", "B", "C"], ["A", "B", "C"], 322)
+        _, gages, _, confluences = sg.build_rivers(["A", "B", "C"], ["A", "B", "C"], 322)
         assert "skipping B: 429" in capsys.readouterr().err
         assert {g["site"] for g in gages} >= {"A00001", "C00001"} and confluences == []
 
