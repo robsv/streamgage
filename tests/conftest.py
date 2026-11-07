@@ -22,6 +22,12 @@ def fixture():
     return load
 
 
+@pytest.fixture(autouse=True)
+def nws_is_up(monkeypatch):
+    """Each test starts with the NWS answering, whatever an earlier test did to the run's state."""
+    monkeypatch.setitem(sg.nws_state, "down", False)
+
+
 @pytest.fixture
 def route(monkeypatch):
     """Replace sg.get_json and sg.get_text with a router, so code under test never uses the network.
@@ -57,10 +63,13 @@ def make_page(monkeypatch, tmp_path):
     make_page(gages, title="Peace River", lines=(), retired=()) returns the HTML text. Use it to
     test what the tool writes, not just the functions behind it.
     """
-    def render(gages, title="Peace River", lines=(), retired=(), extra_args=()):
+    def render(gages, title="Peace River", lines=(), retired=(), extra_args=(), confluences=()):
         out = tmp_path / "page.html"
         monkeypatch.setattr(sg, "resolve_anchor", lambda *a, **k: "01234567")
         monkeypatch.setattr(sg, "build_gages", lambda anchor, km, draw=False, as_of=None: (list(lines), gages, list(retired)))
+        if confluences:
+            monkeypatch.setattr(sg, "build_rivers", lambda anchors, labels, km, draw=False, as_of=None: (
+                list(lines), gages, list(retired), list(confluences)))
         monkeypatch.setattr("sys.argv", ["streamgage.py", title, "--out", str(out), *extra_args])
         sg.main()
         return out.read_text(encoding="utf-8")
@@ -78,6 +87,15 @@ def gage(site="02297345", name="Peace River At Platt FL", **overrides):
             "recent": {"low": -0.77, "high": 2.89, "peak": 2.89, "peak_time": 1793840400000,
                        "range_pos": 100.0, "rate": 0.008277, "delta24": 1.48,
                        "series": [[1793836800000, 2.5], [1793840400000, 2.89]]}}
+    base.update(overrides)
+    return base
+
+
+def confluence(rivers=("Peace River", "Horse Creek"), **overrides):
+    """A confluence dict shaped like build_rivers() output."""
+    base = {"lat": 27.0977, "lon": -81.9858, "rivers": list(rivers),
+            "nearest": [{"river": r, "site": f"0229700{i}", "name": f"{r} Near Nocatee FL", "km": 2.5 + i}
+                        for i, r in enumerate(rivers)]}
     base.update(overrides)
     return base
 

@@ -97,16 +97,16 @@ first run creates the environment. The script prints a summary table to the term
 web, so you need an internet connection to view it.
 
 ```
-pixi run map [river] [--state STATE] [--anchor SITE] [--list] [--distance MILES] [--retired] [--as-of TIME] [--out PATH]
+pixi run map [river ...] [--state STATE] [--anchor SITE ...] [--list] [--distance MILES] [--retired] [--as-of TIME] [--out PATH]
 ```
 
 Options (`--help` lists them all):
 
 | Option | What it does |
 |---|---|
-| `river` | River name as USGS spells it, such as `"Myakka River"`. Also used as the map title. |
+| `river` | River name as USGS spells it, such as `"Myakka River"`. Also used as the map title. Give several to map them together and mark where they meet (see [Several rivers at once](#several-rivers-at-once)). |
 | `--state` | State abbreviation or full name (`FL`, `Florida`). Needed when the name exists in more than one state. |
-| `--anchor` | A USGS site number on the river (such as `02296750`). Skips the name lookup. |
+| `--anchor` | A USGS site number on the river (such as `02296750`). Skips the name lookup. Repeat it, without names, to map several rivers by site. |
 | `--list` | Print the candidate gages for the name, with basin sizes, and exit without drawing. |
 | `--distance` | Miles to walk upstream and downstream of the anchor. Default: `200`. |
 | `--retired` | Also draw gages that no longer report stage (retired, or offline) as faint markers in a layer you can switch off. See [Sites that are not on the map](#sites-that-are-not-on-the-map). |
@@ -128,6 +128,9 @@ python3 streamgage.py "Peace River" --list
 
 # Skip the lookup and start from a specific gage
 python3 streamgage.py "Peace River" --anchor 02296750
+
+# Several rivers at once, with a marker where they meet
+python3 streamgage.py "Shenango River" "Mahoning River" "Beaver River" --state PA
 
 # Write to a specific file
 python3 streamgage.py "Myakka River" --out ~/Desktop/myakka.html
@@ -361,6 +364,43 @@ no gage was reporting stage. To find a moment worth showing, look at a gage's re
 or run the tool at a few times and compare. For an example, see
 [Arcadia, November 2026: a storm in six frames](docs/arcadia-nov-2026.md), which uses six moments of
 one flood.
+
+### Several rivers at once
+
+Give more than one river name and the tool draws them all on one map, so you can see how a river
+system fits together. `--state` applies to every name. To use sites instead of names, repeat `--anchor`
+and leave the names off (`--anchor 03104515 --anchor 03099695`). Each river is built the way it is on
+its own (its own anchor and its own walk up and down), then the results are merged: a gage or flowline
+that two rivers share appears once. A river with no gage reporting stage is skipped with a warning
+rather than stopping the run, and the title is the names joined with " + ". `--list` shows the
+candidates for every name.
+
+**Confluences.** Where the rivers meet, the map puts a purple ring. Its popup names the rivers that
+meet there and the nearest gage on each, with its distance. Rivers that join at one place (Shenango,
+Mahoning and Beaver) give one marker naming all of them. The markers are a layer you can switch off,
+and the terminal output lists them with their coordinates.
+
+A confluence is where two rivers' channels begin to coincide: the upstream end of the stretch they
+share, provided each river arrives there on a segment of its own. Looking at where the channels
+overlap means two rivers meet even if the river they form is not on your list, as the Shenango and
+Mahoning do at the start of the Beaver. It is worked out from the NLDI flowlines, which cost two more
+requests per river. If that lookup fails, you still get the map, without the markers.
+
+Things to know:
+
+- **Rivers NLDI treats as one.** The Mahoning and the Beaver are filed under the same mainstem, so the
+  gages below the join count for both rivers. The nearest gage to a confluence can be on the river
+  it formed rather than on the one you named.
+- **Only your rivers.** A confluence is marked only where two of the rivers you listed meet. A
+  tributary you did not name is not drawn, and does not get a marker.
+- **A long run.** Every river does its own gage lookups, so a run takes about as long per river as it
+  does alone.
+- **Rate limits.** The services sometimes answer "too many requests" (HTTP 429), the NWS most often,
+  and more so when several rivers make many requests in a row. The tool waits and retries (2, 5, 10, 20
+  and 30 seconds, or as long as the service asks, up to a minute) for 429 and 502, 503 or 504 answers;
+  other errors are not retried. If the NWS still refuses after that, the run does not stop: the rest of it skips the NWS, and the gages are colored by percentile with no flood
+  categories or forecasts, with a message saying so. Run it again later for those. A river that fails
+  for any other network reason (including an NWS error that is not a refusal) is skipped with a warning and the others are still drawn.
 
 ### Basemaps
 
@@ -612,6 +652,8 @@ cause is that the Leaflet script from unpkg is blocked or unreachable.
   cache of the NWS thresholds, which rarely change.
 - Marker clustering for the crowded areas on a single river.
 - Coloring the river line itself between gages.
+- A time view for confluences: stage histories above and below a meeting side by side, to show how
+  long a rise on one river takes to reach the other.
 - Discharge-only gages. Their long-term statistics would also be the better-behaved case, since
   discharge is steadier than stage across decades.
 - Trend thresholds scaled to each gage's own typical rate of change.

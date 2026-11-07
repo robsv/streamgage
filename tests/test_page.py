@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import streamgage as sg
-from tests.conftest import gage, retired_gage
+from tests.conftest import confluence, gage, retired_gage
 
 NODE = shutil.which("node")
 needs_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
@@ -22,8 +22,8 @@ def inline_script(page):
 
 def test_template_placeholders_are_the_ones_main_substitutes():
     assert set(re.findall(r"__[A-Z_]+__", sg.HTML)) == {
-        "__TITLE__", "__TITLE_JSON__", "__RIVER__", "__GAGES__", "__RETIRED__", "__AS_OF__",
-        "__GENERATED__"}
+        "__TITLE__", "__TITLE_JSON__", "__RIVER__", "__GAGES__", "__RETIRED__", "__CONFLUENCES__",
+        "__AS_OF__", "__GENERATED__"}
 
 
 def test_leaflet_is_pinned_with_integrity_hashes():
@@ -40,6 +40,18 @@ def test_the_retired_layer_is_wired_into_the_page(make_page):
     assert "layersCtl.addOverlay(retiredLayer" in page  # a checkbox in the layers control
     assert "No longer reporting (retired or offline)" in page  # the legend entry
     assert "const RETIRED = [{" in page
+
+
+def test_the_confluence_layer_is_wired_into_the_page(make_page):
+    page = make_page([gage()], confluences=[confluence()])
+    assert "layersCtl.addOverlay(confluenceLayer" in page  # a checkbox in the layers control
+    assert "</span>River confluence</div>" in page  # the legend entry
+    assert "const CONFLUENCES = [{" in page
+    assert "Peace River" in page and "Horse Creek Near Nocatee FL" in page
+
+
+def test_a_single_river_page_has_no_confluences(make_page):
+    assert "const CONFLUENCES = [];" in make_page([gage()])
 
 
 def test_the_cresting_rule_is_in_the_template_with_its_documented_thresholds():
@@ -83,6 +95,17 @@ def test_embedded_script_is_valid_with_hostile_data(make_page, tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+@needs_node
+def test_embedded_script_is_valid_with_hostile_confluence_names(make_page, tmp_path):
+    evil = confluence(rivers=("</script><img src=x onerror=alert(1)>", "<b>x</b>"))
+    page = make_page([gage()], title="a</script>b + c", confluences=[evil])
+    assert "</script><img" not in inline_script(page)  # the data cannot end the script block
+    script = tmp_path / "page.js"
+    script.write_text(inline_script(page), encoding="utf-8")
+    result = subprocess.run([NODE, "--check", str(script)], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
 def between(text, start, end):
     """The part of the template from `start` up to (not including) `end`; fail loudly if moved."""
     assert start in text and end in text, f"template markers moved: {start!r} .. {end!r}"
@@ -98,6 +121,7 @@ def test_page_logic(tmp_path):
         between(template, "const esc =", "const map ="),  # esc, tables, bins, color
         between(template, "function spark(g)", "function icon(g)"),  # sparklines, helpers, popup
         between(template, "function retiredPopup", "if (RETIRED.length) {"),  # retired popup
+        between(template, "function confluencePopup", "if (CONFLUENCES.length) {"),  # confluence popup
     ])
     script = tmp_path / "logic.js"
     script.write_text(prelude + "\n" + LOGIC_TESTS.read_text(encoding="utf-8"), encoding="utf-8")

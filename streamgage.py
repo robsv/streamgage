@@ -18,6 +18,8 @@ Examples:
     python streamgage.py "Myakka River" --state FL
     python streamgage.py "Peace River" --list         # show candidate gages and exit
     python streamgage.py "Peace River" --anchor 02296750   # skip the name lookup
+    python streamgage.py "Shenango River" "Mahoning River" "Beaver River" --state PA   # several rivers
+                                                      # at once, with a marker where they meet
 """
 
 import argparse
@@ -28,6 +30,7 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from itertools import combinations
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -63,6 +66,7 @@ MAX_SITES_PER_REQUEST = 100  # NWIS limit
 STALE_AFTER = timedelta(days=3)  # ignore gages whose latest stage reading is older than this
 FLOOD_CATEGORIES = ("action", "minor", "moderate", "major")  # the ones the page knows how to color
 MATCH_RADIUS_KM = 0.5  # max distance between a USGS site and its NWS gauge
+CONFLUENCE_MERGE_KM = 0.5  # confluence points closer than this are one meeting of rivers
 KM_PER_MILE = 1.609344  # --distance is in miles; the NLDI API takes whole kilometers
 RECENT_DAYS = 7  # window for range position, peak and the recent sparkline
 TREND_HOURS = 6  # window for the rate-of-change fit
@@ -75,10 +79,40 @@ session = requests.Session()
 session.headers["User-Agent"] = "streamgage-map/1.0"
 
 
+RETRY_STATUSES = (429, 502, 503, 504)  # rate limited, or briefly unavailable (a plain 500 is not retried)
+RETRY_DELAYS = (2, 5, 10, 20, 30)  # seconds to wait before each retry; the last one is the final try
+MAX_RETRY_AFTER = 60  # never wait longer than this because a server asked us to
+
+
+nws_state = {"down": False}  # set once the NWS has refused us after every retry, so later rivers skip it
+
+
+def get(url, params):
+    """GET with retries. A rate-limited (429) or briefly failing service gets a few more tries, waiting
+    as long as it asks (Retry-After) or the next backoff step; any other error is raised at once."""
+    for delay in (*RETRY_DELAYS, None):
+        r = session.get(url, params=params, timeout=60)
+        if r.status_code not in RETRY_STATUSES or delay is None:
+            r.raise_for_status()
+            return r
+        try:
+            asked = float(r.headers.get("Retry-After", ""))
+        except ValueError:
+            asked = 0
+        wait = min(max(delay, asked), MAX_RETRY_AFTER)
+        print(f"  {r.status_code} from {url.split('?')[0]}; retrying in {wait:g} s", file=sys.stderr)
+        time.sleep(wait)
+
+
+def is_refusal(err):
+    """True for an HTTP error that means the service is too busy or briefly down (the kind get() retries),
+    as opposed to a bad request, a missing page, or a connection that never got an answer."""
+    response = getattr(err, "response", None)
+    return isinstance(err, requests.HTTPError) and response is not None and response.status_code in RETRY_STATUSES
+
+
 def get_json(url, **params):
-    r = session.get(url, params=params, timeout=60)
-    r.raise_for_status()
-    return r.json()
+    return get(url, params).json()
 
 
 def haversine_km(lat1, lon1, lat2, lon2):
@@ -187,6 +221,80 @@ def fetch_river(anchor, distance_km):
     return lines, sites
 
 
+def fetch_paths(anchor, distance_km):
+    """{comid: flowline feature} for the channel through anchor, up its main path and down it.
+
+    Unlike fetch_river this keeps everything the walks return, including the stretch past the mouth
+    that fetch_river leaves undrawn, because that is where one river runs into another.
+    """
+    paths = {}
+    for mode in ("UM", "DM"):
+        for f in get_json(f"{NLDI}/USGS-{anchor}/navigation/{mode}/flowlines",
+                          distance=distance_km, f="json")["features"]:
+            paths.setdefault(f["properties"].get("nhdplus_comid"), f)
+    return paths
+
+
+def _ends(feature):
+    """The (first, last) vertex of a flowline, rounded so that segments sharing a node compare equal.
+    NLDI draws each flowline in the direction the water flows."""
+    geom = feature["geometry"]
+    coords = geom["coordinates"]
+    if geom["type"] == "MultiLineString":
+        coords = [pt for part in coords for pt in part]
+    return tuple(tuple(round(v, 6) for v in pt[:2]) for pt in (coords[0], coords[-1]))
+
+
+def find_confluences(paths):
+    """Where the rivers in `paths` ({name: {comid: flowline}}) meet, as [{"lat", "lon", "rivers"}].
+
+    Two rivers meet where their channels start to coincide: the upstream end of the stretch they
+    share, if each river arrives there on a segment of its own. Requiring both arrivals rules out the
+    far end of a walk, where one river's path merely stops while the other's carries on.
+    Meetings within CONFLUENCE_MERGE_KM of each other are one confluence, so three rivers that
+    join at one place give a single marker naming all three.
+
+    A river's path can run through a meeting it is no part of: Joshua Creek's walk goes down the Peace
+    past where Horse Creek joins. Such a river arrives only on segments another river also arrives on,
+    and its path is the shorter one, and it has already met that river at a confluence of its own, so it
+    is dropped from this one. (Rivers NLDI files as one channel, like the Mahoning and the Beaver, never
+    meet each other, so they are all kept.)
+    """
+    found = []  # [lat, lon, [river names], {node keys}]
+    for a, b in combinations(paths, 2):
+        pa, pb = paths[a], paths[b]
+        shared = pa.keys() & pb.keys()
+        if not shared:
+            continue
+        ends = [_ends(pa[c]) for c in shared]
+        shared_ends = {last for _, last in ends}
+        arrivals_a = {_ends(f)[1] for c, f in pa.items() if c not in shared}
+        arrivals_b = {_ends(f)[1] for c, f in pb.items() if c not in shared}
+        for first, _ in ends:
+            if first in shared_ends or first not in arrivals_a or first not in arrivals_b:
+                continue
+            lon, lat = first
+            for hit in found:
+                if haversine_km(lat, lon, hit[0], hit[1]) <= CONFLUENCE_MERGE_KM:
+                    hit[2].extend(n for n in (a, b) if n not in hit[2])
+                    hit[3].add(first)
+                    break
+            else:
+                found.append([lat, lon, [a, b], {first}])
+    out = []
+    for i, (lat, lon, names, nodes) in sorted(enumerate(found), key=lambda e: -e[1][0]):
+        arrives = {n: {c for c, f in paths[n].items() if _ends(f)[1] in nodes} for n in names}
+        # the pairs that also meet at some other confluence: those rivers have already joined
+        elsewhere = {frozenset(pair) for j, other in enumerate(found) if j != i
+                     for pair in combinations(other[2], 2)}
+        keep = [n for n in names
+                if not any(arrives[n] <= arrives[o] and len(paths[n]) < len(paths[o])
+                           and frozenset((n, o)) in elsewhere for o in names if o != n)]
+        if len(keep) > 1:  # defensive: pruning should never leave a lone river, but that is no meeting
+            out.append({"lat": lat, "lon": lon, "rivers": sorted(keep, key=list(paths).index)})
+    return out
+
+
 def usable(value):
     """Parse an NWIS value; None for blanks and the -999999 style no-data sentinels."""
     try:
@@ -252,9 +360,7 @@ def describe_moment(when):
 
 
 def get_text(url, **params):
-    r = session.get(url, params=params, timeout=60)
-    r.raise_for_status()
-    return r.text
+    return get(url, params).text
 
 
 def parse_rdb(text):
@@ -597,9 +703,20 @@ def build_gages(anchor, distance_km, draw_retired=False, as_of=None):
 
     lats = [sites[s][1] for s in current]
     lons = [sites[s][2] for s in current]
-    nws = get_json(NWPS, **{"bbox.xmin": min(lons) - 0.02, "bbox.ymin": min(lats) - 0.02,
-                            "bbox.xmax": max(lons) + 0.02, "bbox.ymax": max(lats) + 0.02,
-                            "srid": "EPSG_4326"})["gauges"]
+    nws = []
+    if not nws_state["down"]:
+        try:
+            nws = get_json(NWPS, **{"bbox.xmin": min(lons) - 0.02, "bbox.ymin": min(lats) - 0.02,
+                                    "bbox.xmax": max(lons) + 0.02, "bbox.ymax": max(lats) + 0.02,
+                                    "srid": "EPSG_4326"})["gauges"]
+        except requests.RequestException as err:
+            if not is_refusal(err):  # a bad request or a dropped connection is not "too busy"
+                raise
+            # flood stages and forecasts are extras: without them every gage is colored by percentile
+            print(f"NWS flood stages unavailable ({err}); drawing the gages without flood categories "
+                  "or forecasts. The rest of this run will skip the NWS; run it again later for those.",
+                  file=sys.stderr)
+            nws_state["down"] = True
 
     stats = fetch_daily_stats({site: reading_day(when) for site, (_, when) in current.items()})
 
@@ -624,6 +741,70 @@ def build_gages(anchor, distance_km, draw_retired=False, as_of=None):
         gages = list(pool.map(build, current))
     retired = sorted(retired, key=lambda g: -g["lat"]) if draw_retired else []
     return lines, sorted(gages, key=lambda g: -g["lat"]), retired
+
+
+def nearest_gages(confluence, gages_by_river):
+    """For each river at a confluence, its closest reporting gage as {"river", "site", "name", "km"}."""
+    out = []
+    for river in confluence["rivers"]:
+        gages = gages_by_river.get(river, [])
+        if gages:
+            km, g = min(((haversine_km(confluence["lat"], confluence["lon"], g["lat"], g["lon"]), g)
+                         for g in gages), key=lambda t: t[0])
+            out.append({"river": river, "site": g["site"], "name": g["name"], "km": round(km, 1)})
+    return out
+
+
+def build_rivers(anchors, labels, distance_km, draw_retired=False, as_of=None):
+    """Return (flowlines, gages, retired, confluences) for one or more rivers.
+
+    `anchors` and `labels` are parallel lists. With a single river this is build_gages and there are
+    no confluences. With several, each river is built on its own and the results merged (a gage or
+    flowline shared by two rivers appears once); a river with nothing to show is skipped with a
+    warning. Confluences are where the rivers meet, each with the nearest gage on every river.
+    """
+    if len(anchors) == 1:
+        return (*build_gages(anchors[0], distance_km, draw_retired, as_of), [])
+    lines, gages, retired, by_river, seen = [], {}, {}, {}, set()
+    for anchor, label in zip(anchors, labels):
+        print(f"\n{label}:", file=sys.stderr)
+        try:
+            river_lines, river_gages, river_retired = build_gages(anchor, distance_km, draw_retired, as_of)
+        except SystemExit as err:
+            if not isinstance(err.code, str):
+                raise
+            print(f"  skipping {label}: {err.code}", file=sys.stderr)
+            continue
+        except requests.RequestException as err:  # one river's outage should not lose the others
+            print(f"  skipping {label}: {err}", file=sys.stderr)
+            continue
+        for f in river_lines:
+            comid = f.get("properties", {}).get("nhdplus_comid")
+            if comid is None or comid not in seen:
+                seen.add(comid)
+                lines.append(f)
+        for g in river_gages:
+            gages.setdefault(g["site"], g)
+        for g in river_retired:
+            retired.setdefault(g["site"], g)
+        by_river[label] = river_gages
+    if not by_river:
+        sys.exit("None of these rivers has a gage reporting recent gage height (parameter 00065).")
+    retired = [g for site, g in retired.items() if site not in gages]
+    confluences = []
+    if len(by_river) > 1:
+        try:
+            wanted = [(anchor, label) for anchor, label in zip(anchors, labels) if label in by_river]
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                paths = dict(zip((label for _, label in wanted),
+                                 pool.map(lambda al: fetch_paths(al[0], distance_km), wanted)))
+            confluences = find_confluences(paths)
+        except (requests.RequestException, KeyError, ValueError, IndexError, TypeError) as err:
+            print(f"Could not look for confluences: {err}", file=sys.stderr)
+        for c in confluences:
+            c["nearest"] = nearest_gages(c, by_river)
+    return (lines, sorted(gages.values(), key=lambda g: -g["lat"]),
+            sorted(retired, key=lambda g: -g["lat"]), confluences)
 
 
 HTML = """<!doctype html>
@@ -662,6 +843,9 @@ HTML = """<!doctype html>
               border-radius: 50%; background: #6b6b6b; vertical-align: middle; margin-right: 4px; }
   .rt { width: 10px; height: 10px; border: 2px solid #6b6b6b; border-radius: 50%;
         background: rgba(255,255,255,.7); }
+  .cf { width: 14px; height: 14px; border: 3px solid #6a1b9a; border-radius: 50%; background: #fff;
+        box-shadow: 0 0 3px #000; box-sizing: border-box; }
+  .sw.cf { width: 12px; height: 12px; box-shadow: none; border-width: 3px; vertical-align: middle; margin-right: 6px; }
   .sw.ret { width: 8px; height: 8px; border: 2px solid #6b6b6b; border-radius: 50%; background: #fff; }
   .modes label { display: block; cursor: pointer; }
   .cap { font-size: 10px; color: #666; }
@@ -681,6 +865,7 @@ const RETIRED = __RETIRED__;
 const GENERATED = "__GENERATED__";
 const AS_OF = __AS_OF__;
 const TITLE = __TITLE_JSON__;
+const CONFLUENCES = __CONFLUENCES__;
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 
 const NWS = {normal: ["#2e9e4f", "Normal"], action: ["#f2d424", "Action"],
@@ -912,6 +1097,23 @@ if (RETIRED.length) {
   layersCtl.addOverlay(retiredLayer, `Retired or offline (${RETIRED.length})`);
 }
 
+function confluencePopup(c) {
+  const names = c.rivers.map(esc), last = names.pop();
+  const meet = names.length ? `${names.join(", ")} and ${last}` : last;
+  const rows = (c.nearest || []).map(n =>
+    `<tr><td>${esc(n.river)}</td><td>${esc(n.name)}<br><span class="sub">USGS ${esc(n.site)}, ${n.km} km away</span></td></tr>`).join("");
+  return `<div class="pop"><b>River confluence</b><br>${meet} meet here.` +
+         (rows ? `<br><span class="cap">Nearest gage on each:</span><table>${rows}</table>` : "") + "</div>";
+}
+
+if (CONFLUENCES.length) {
+  const confluenceLayer = L.layerGroup(CONFLUENCES.map(c =>
+    L.marker([c.lat, c.lon], {icon: L.divIcon({className: "", iconSize: [14, 14], html: '<div class="cf"></div>'}),
+                              title: "Confluence: " + c.rivers.join(", "), zIndexOffset: 500})
+      .bindPopup(confluencePopup(c)))).addTo(map);
+  layersCtl.addOverlay(confluenceLayer, `River confluences (${CONFLUENCES.length})`);
+}
+
 const markers = GAGES.map(g =>
   L.marker([g.lat, g.lon], {icon: icon(g), title: g.name}).bindPopup(popup(g)).addTo(map));
 
@@ -926,6 +1128,7 @@ function drawLegend() {
   h += "<div style='margin-top:4px'>▲/▼ inside a gage = rising/falling over the last 6 h (double = fast)<br>▬ = steady, none = no trend data</div>";
   if (GAGES.some(isCresting)) h += crestLegendLine();
   if (RETIRED.length) h += '<div style="margin-top:4px"><span class="sw ret"></span>No longer reporting (retired or offline)</div>';
+  if (CONFLUENCES.length) h += '<div style="margin-top:4px"><span class="sw cf"></span>River confluence</div>';
   legend.getContainer().innerHTML = h;
 }
 legend.onAdd = () => L.DomUtil.create("div", "panel legend");
@@ -950,7 +1153,7 @@ modeCtl.addTo(map);
 const title = L.control({position: "topright"});
 title.onAdd = () => {
   const d = L.DomUtil.create("div", "panel");
-  d.innerHTML = `<h4>${esc(TITLE)} stream gages</h4>${GAGES.length} gage${GAGES.length === 1 ? "" : "s"}${RETIRED.length ? ` + ${RETIRED.length} no longer reporting` : ""} &middot; ` +
+  d.innerHTML = `<h4>${esc(TITLE)} stream gages</h4>${GAGES.length} gage${GAGES.length === 1 ? "" : "s"}${RETIRED.length ? ` + ${RETIRED.length} no longer reporting` : ""}${CONFLUENCES.length ? `, ${CONFLUENCES.length} confluence${CONFLUENCES.length === 1 ? "" : "s"}` : ""} &middot; ` +
     (AS_OF ? `as of ${esc(AS_OF)}<br><span class="cap">generated ${GENERATED}</span>` : `generated ${GENERATED}`);
   return d;
 };
@@ -963,9 +1166,11 @@ title.addTo(map);
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("river", nargs="?", help="river name as USGS spells it, e.g. 'Myakka River'")
+    ap.add_argument("river", nargs="*", help="river name as USGS spells it, e.g. 'Myakka River'; "
+                    "give several to map them together and mark where they meet")
     ap.add_argument("--state", help="state abbreviation or name, to disambiguate shared river names")
-    ap.add_argument("--anchor", help="USGS site number on the river (skips the name lookup)")
+    ap.add_argument("--anchor", action="append",
+                    help="USGS site number on the river (skips the name lookup); repeat it for several rivers")
     ap.add_argument("--list", action="store_true", help="list candidate gages for the name and exit")
     ap.add_argument("--distance", type=float, default=200,
                     help="miles to navigate each direction (default: %(default)g)")
@@ -981,15 +1186,38 @@ def main():
 
     if args.list and not args.river:
         ap.error("--list needs a river name")
+    if args.anchor and args.river and (len(args.river) > 1 or len(args.anchor) > 1) and not args.list:
+        ap.error("--anchor goes with one river name and replaces its lookup; to map several rivers by "
+                 "site, repeat --anchor and leave the names off")
     try:
         as_of = parse_as_of(args.as_of) if args.as_of else None
     except ValueError as err:
         ap.error(f"--as-of: {err}")
     # --list always shows candidates (and exits), even if --anchor was also given
-    anchor = args.anchor if args.anchor and not args.list else resolve_anchor(
-        args.river, args.state, args.list)
-    title = args.river or f"USGS {anchor}"
-    lines, gages, retired = build_gages(anchor, round(args.distance * KM_PER_MILE), args.retired, as_of)
+    if args.list:
+        for name in args.river:
+            if len(args.river) > 1:
+                print(f"\n{name}:")
+            try:
+                resolve_anchor(name, args.state, True)  # prints the candidates, then exits
+            except SystemExit as err:
+                if err.code not in (0, None):  # "no gages found" and the like still stop the run
+                    raise
+        sys.exit(0)
+    if args.anchor:
+        anchors = args.anchor
+        labels = [args.river[0]] if len(anchors) == 1 and args.river else [f"USGS {a}" for a in anchors]
+    else:
+        names = list(dict.fromkeys(n.strip() for n in args.river))  # a name given twice is one river
+        anchors = [resolve_anchor(name, args.state) for name in names]
+        labels = names
+    seen = {}  # the same site given twice, or by two names, is one river
+    for anchor, label in zip(anchors, labels):
+        seen.setdefault(anchor, label)
+    anchors, labels = list(seen), list(seen.values())
+    title = " + ".join(labels)
+    lines, gages, retired, confluences = build_rivers(
+        anchors, labels, round(args.distance * KM_PER_MILE), args.retired, as_of)
     stem = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") + (f"_{as_of:%Y-%m-%d_%H%M}" if as_of else "")
     out = args.out or f"{stem}_gages.html"
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -999,10 +1227,11 @@ def main():
 
     values = {"TITLE": html.escape(title), "TITLE_JSON": safe_json(title),
               "RIVER": safe_json({"type": "FeatureCollection", "features": lines}),
-              "GAGES": safe_json(gages), "RETIRED": safe_json(retired), "GENERATED": generated,
+              "GAGES": safe_json(gages), "RETIRED": safe_json(retired),
+              "CONFLUENCES": safe_json(confluences), "GENERATED": generated,
               "AS_OF": safe_json(describe_moment(as_of) if as_of else None)}
     # one pass, so text inside a substituted value can never be mistaken for a placeholder
-    page = re.sub(r"__(TITLE_JSON|TITLE|RIVER|GAGES|RETIRED|AS_OF|GENERATED)__", lambda m: values[m.group(1)], HTML)
+    page = re.sub(r"__(TITLE_JSON|TITLE|RIVER|GAGES|RETIRED|CONFLUENCES|AS_OF|GENERATED)__", lambda m: values[m.group(1)], HTML)
     with open(out, "w", encoding="utf-8") as f:
         f.write(page)
     print(f"Wrote {out}", file=sys.stderr)
@@ -1014,6 +1243,11 @@ def main():
         r = g["recent"]
         trend = f"{r['rate']:+.3f} ft/h" if r and r["rate"] is not None else "n/a"
         print(f"{g['site']}  {g['stage']:7.2f} ft  {info:9s} {trend:>11s}  {g['name']}")
+    if confluences:
+        print(f"\nConfluences ({len(confluences)}):")
+        for c in confluences:
+            near = "; ".join(f"{n['river']}: {n['site']} {n['km']} km" for n in c["nearest"])
+            print(f"{c['lat']:.4f}, {c['lon']:.4f}  {' + '.join(c['rivers'])}" + (f"  (nearest gages {near})" if near else ""))
     if retired:
         print(f"\nNo longer reporting stage ({len(retired)}):")
         for r in retired:
