@@ -39,15 +39,27 @@ class TestFindCandidates:
     def test_builds_the_name_filter(self, route):
         calls = route({sg.MONITORING: monitoring()})
         sg.find_candidates("  Peace River ")
-        _, params = calls[0]
-        assert params["filter"] == "monitoring_location_name LIKE 'PEACE RIVER %'"
-        assert params["site_type_code"] == "ST"
-        assert "state_name" not in params
+        filters = [params["filter"] for _, params in calls]
+        # The filter is case-sensitive and USGS names are upper case in some states, mixed in others
+        assert filters == ["monitoring_location_name LIKE 'Peace River %'",
+                           "monitoring_location_name LIKE 'PEACE RIVER %'"]
+        for _, params in calls:
+            assert params["site_type_code"] == "ST"
+            assert "state_name" not in params
 
     def test_apostrophes_are_escaped_in_the_filter(self, route):
         calls = route({sg.MONITORING: monitoring()})
         sg.find_candidates("St. Mary's River")
-        assert "'ST. MARY''S RIVER %'" in calls[0][1]["filter"]
+        assert all("''s" in params["filter"].lower() for _, params in calls)
+        likes = [params["filter"].split(" LIKE ")[1] for _, params in calls]
+        assert "'ST. MARY''S RIVER %'" in likes
+
+    def test_finds_mixed_case_names(self, route):
+        # Pennsylvania spells it "Shenango River at ...", Florida "PEACE RIVER AT ..."; the stub
+        # returns the same rows for every variant, so they must not be listed twice
+        route({sg.MONITORING: monitoring(
+            ("03103500", "Shenango River at Sharpsville, PA", "Pennsylvania", 584.0))})
+        assert [c["site"] for c in sg.find_candidates("shenango river")] == ["03103500"]
 
     @pytest.mark.parametrize("state, expected", [
         ("FL", "Florida"), ("fl", "Florida"), ("Florida", "Florida"),
