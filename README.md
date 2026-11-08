@@ -426,7 +426,7 @@ Things to know:
 - **Checked on real river systems.** The confluence rules were run on the Shenango, Mahoning and
   Beaver; the Peace and its creeks; the Allegheny, Monongahela, Youghiogheny, Kiskiminetas, Ohio and
   Beaver around Pittsburgh; and the Susquehanna with the West Branch, Juniata and Swatara. For the
-  Pittsburgh and Susquehanna systems, every junction was found within about 2.5 km of the town it is
+  Pittsburgh and Susquehanna systems, every junction was found within about 1.5 miles of the town it is
   at (compared with rough coordinates for each town); the Peace's creeks and the start of the Beaver
   were checked against the map by eye. The flowlines for these are recorded in
   `tests/fixtures/nldi_paths.json`, so the tests check them without the network.
