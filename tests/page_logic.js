@@ -291,7 +291,7 @@ check(!hostile.includes("<img") && !hostile.includes("<script>") && !hostile.inc
 
 // ---- confluence popup ---------------------------------------------------------------------
 const cf = (rivers, nearest) => ({lat: 40.9, lon: -80, rivers, nearest});
-const near = (river, site, name, km) => ({river, site, name, km});
+const near = (river, site, name, miles) => ({river, site, name, miles});
 check(confluencePopup(cf(["Shenango River", "Mahoning River", "Beaver River"], []))
         .includes("Shenango River, Mahoning River and Beaver River meet here."), "three rivers are listed with a final 'and'");
 check(confluencePopup(cf(["Peace River", "Horse Creek"], [])).includes("Peace River and Horse Creek meet here."),
@@ -304,11 +304,11 @@ check(!confluencePopup({lat: 1, lon: 2, rivers: ["A", "B"]}).includes("Nearest g
 const withGages = confluencePopup(cf(["A", "B"], [near("A", "02297345", "Peace River At Platt FL", 1.8),
                                                   near("B", "02297310", "Horse Creek Near Myakka FL", 11.3)]));
 check(withGages.includes("Nearest gage on each") && withGages.includes("Peace River At Platt FL"), "nearest gages are listed");
-check(withGages.includes("USGS 02297345, 1.8 km away") && withGages.includes("USGS 02297310, 11.3 km away"),
+check(withGages.includes("USGS 02297345, 1.8 mi away") && withGages.includes("USGS 02297310, 11.3 mi away"),
       "each nearest gage shows its site and distance");
 const withBelow = confluencePopup(cf(["A", "B"], [near("A", "1", "A gage", 2.5), {...near("B", "2", "B gage", 8.8), below: true}]));
-check(withBelow.includes("USGS 2, 8.8 km away, below the confluence"), "a gage below the meeting says so");
-check(!withBelow.includes("USGS 1, 2.5 km away, below"), "a gage on the river's own side does not");
+check(withBelow.includes("USGS 2, 8.8 mi away, below the confluence"), "a gage below the meeting says so");
+check(!withBelow.includes("USGS 1, 2.5 mi away, below"), "a gage on the river's own side does not");
 const hostileCf = confluencePopup(cf(['<img src=x onerror=alert(1)>', "<script>alert(1)</script>"],
                                      [near("<b>x</b>", '1"><i>', "<script>y</script>", 1)]));
 check(!hostileCf.includes("<img") && !hostileCf.includes("<script>") && !hostileCf.includes("<b>x") && !hostileCf.includes("<i>"),

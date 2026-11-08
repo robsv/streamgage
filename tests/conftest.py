@@ -94,7 +94,7 @@ def gage(site="02297345", name="Peace River At Platt FL", **overrides):
 def confluence(rivers=("Peace River", "Horse Creek"), **overrides):
     """A confluence dict shaped like build_rivers() output."""
     base = {"lat": 27.0977, "lon": -81.9858, "rivers": list(rivers),
-            "nearest": [{"river": r, "site": f"0229700{i}", "name": f"{r} Near Nocatee FL", "km": 2.5 + i}
+            "nearest": [{"river": r, "site": f"0229700{i}", "name": f"{r} Near Nocatee FL", "miles": 1.5 + i}
                         for i, r in enumerate(rivers)]}
     base.update(overrides)
     return base
