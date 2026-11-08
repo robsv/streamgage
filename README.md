@@ -461,7 +461,7 @@ one HTML file (Leaflet map with the data embedded)
 Details worth knowing:
 
 - **Matching USGS to NWS gages.** For each USGS gage, the script finds the nearest NWS gauge within
-  0.5 km, fetches its record, and accepts the match only if the NWS record lists the same USGS site
+  about a third of a mile (0.5 km), fetches its record, and accepts the match only if the NWS record lists the same USGS site
   number. A nearby gauge for a different site is never used.
 - **Only gages on this river's mainstem.** NLDI sites carry a mainstem identifier. Gages on a
   different river (for example, one the downstream walk runs into past the mouth) are dropped. Gages

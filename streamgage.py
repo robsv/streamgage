@@ -67,7 +67,7 @@ STALE_AFTER = timedelta(days=3)  # ignore gages whose latest stage reading is ol
 FLOOD_CATEGORIES = ("action", "minor", "moderate", "major")  # the ones the page knows how to color
 MATCH_RADIUS_KM = 0.5  # max distance between a USGS site and its NWS gauge
 CONFLUENCE_MERGE_KM = 0.5  # confluence points closer than this are one meeting of rivers
-KM_PER_MILE = 1.609344  # --distance is in miles; the NLDI API takes whole kilometers
+KM_PER_MILE = 1.609344  # distances are shown in miles; --distance is in miles and the NLDI API takes whole kilometers
 RECENT_DAYS = 7  # window for range position, peak and the recent sparkline
 TREND_HOURS = 6  # window for the rate-of-change fit
 MIN_RECENT_POINTS = 12  # fewer instantaneous readings than this and the recent stats are skipped
@@ -792,7 +792,7 @@ def build_gages(anchor, distance_km, draw_retired=False, as_of=None, paths=None,
 
 
 def nearest_gages(confluence, gages_by_river, comids=None):
-    """For each river at a confluence, its closest reporting gage as {"river", "site", "name", "km"}.
+    """For each river at a confluence, its closest reporting gage as {"river", "site", "name", "miles"}.
 
     A river's walk carries on below the meeting, so its gages include ones on the river it joined or
     formed (the Allegheny's include the Ohio's). "Nearest on each river" means on its own side, above
@@ -809,7 +809,7 @@ def nearest_gages(confluence, gages_by_river, comids=None):
         if pool:
             km, g = min(((haversine_km(confluence["lat"], confluence["lon"], g["lat"], g["lon"]), g)
                          for g in pool), key=lambda t: t[0])
-            entry = {"river": river, "site": g["site"], "name": g["name"], "km": round(km, 1)}
+            entry = {"river": river, "site": g["site"], "name": g["name"], "miles": round(km / KM_PER_MILE, 1)}
             if not above:
                 entry["below"] = True
             out.append(entry)
@@ -1169,7 +1169,7 @@ function confluencePopup(c) {
   const names = c.rivers.map(esc), last = names.pop();
   const meet = names.length ? `${names.join(", ")} and ${last}` : last;
   const rows = (c.nearest || []).map(n =>
-    `<tr><td>${esc(n.river)}</td><td>${esc(n.name)}<br><span class="sub">USGS ${esc(n.site)}, ${n.km} km away${n.below ? ", below the confluence" : ""}</span></td></tr>`).join("");
+    `<tr><td>${esc(n.river)}</td><td>${esc(n.name)}<br><span class="sub">USGS ${esc(n.site)}, ${n.miles} mi away${n.below ? ", below the confluence" : ""}</span></td></tr>`).join("");
   return `<div class="pop"><b>River confluence</b><br>${meet} meet here.` +
          (rows ? `<br><span class="cap">Nearest gage on each:</span><table>${rows}</table>` : "") + "</div>";
 }
@@ -1314,7 +1314,7 @@ def main():
     if confluences:
         print(f"\nConfluences ({len(confluences)}):")
         for c in confluences:
-            near = "; ".join(f"{n['river']}: {n['site']} {n['km']} km" for n in c["nearest"])
+            near = "; ".join(f"{n['river']}: {n['site']} {n['miles']} mi" for n in c["nearest"])
             print(f"{c['lat']:.4f}, {c['lon']:.4f}  {' + '.join(c['rivers'])}" + (f"  (nearest gages {near})" if near else ""))
     if retired:
         print(f"\nNo longer reporting stage ({len(retired)}):")

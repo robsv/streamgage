@@ -335,7 +335,7 @@ class TestNearestGagesAboveTheMeeting:
     def test_when_every_gage_is_below_the_nearest_is_used_and_marked(self):
         by_river = {"A": [gage("x", "X", lat=40.8, lon=-80.0), gage("y", "Y", lat=40.5, lon=-80.0)], "B": []}
         out = sg.nearest_gages(self.meeting(), by_river, {"A": {"x": 3, "y": 4}})
-        assert out == [{"river": "A", "site": "x", "name": "X", "km": pytest.approx(11.1, abs=0.1), "below": True}]
+        assert out == [{"river": "A", "site": "x", "name": "X", "miles": pytest.approx(6.9, abs=0.1), "below": True}]
 
     def test_a_gage_with_no_known_flowline_counts_as_above(self):
         by_river = {"A": [gage("x", "X", lat=40.89, lon=-80.0)], "B": []}
@@ -398,13 +398,21 @@ class TestWhichRiverCarriesThrough:
 
 
 class TestNearestGages:
+    def test_distances_are_in_miles(self):
+        # a gage one mile due north: 1.609344 km is 1.609344 / 111.195 degrees of latitude
+        c = {"lat": 40.0, "lon": -80.0, "rivers": ["A"]}
+        one_mile_north = 40.0 + 1.609344 / 111.195
+        out = sg.nearest_gages(c, {"A": [gage("1", "A", lat=one_mile_north, lon=-80.0)]})
+        assert out[0]["miles"] == 1.0
+        assert "km" not in out[0]
+
     def test_picks_the_closest_gage_on_each_river(self):
         c = {"lat": 40.9, "lon": -80.0, "rivers": ["A", "B", "C"]}
         by_river = {"A": [gage("1", "Far", lat=41.5, lon=-80.0), gage("2", "Near", lat=40.95, lon=-80.0)],
                     "B": [gage("3", "Only", lat=40.9, lon=-80.1)], "C": []}
         out = sg.nearest_gages(c, by_river)
         assert [(n["river"], n["site"]) for n in out] == [("A", "2"), ("B", "3")]  # C has no gage
-        assert out[0]["km"] == pytest.approx(5.6, abs=0.1)
+        assert out[0]["miles"] == pytest.approx(3.5, abs=0.1)  # about 5.6 km
 
 
 @pytest.fixture
@@ -612,9 +620,9 @@ class TestCommandLine:
 
     def test_confluences_are_listed_in_the_terminal_output(self, run, capsys):
         run("A", "B", confluences=[{"lat": 40.9, "lon": -80.0, "rivers": ["A", "B"],
-                                    "nearest": [{"river": "A", "site": "1", "name": "n", "km": 2.5}]}])
+                                    "nearest": [{"river": "A", "site": "1", "name": "n", "miles": 2.5}]}])
         out = capsys.readouterr().out
-        assert "Confluences (1):" in out and "A + B" in out and "A: 1 2.5 km" in out
+        assert "Confluences (1):" in out and "A + B" in out and "A: 1 2.5 mi" in out
 
     def test_list_covers_every_name(self, monkeypatch, capsys):
         listed = []
