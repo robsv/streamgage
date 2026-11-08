@@ -81,7 +81,7 @@ session.headers["User-Agent"] = "streamgage-map/1.0"
 
 RETRY_STATUSES = (429, 502, 503, 504)  # rate limited, or briefly unavailable (a plain 500 is not retried)
 RETRY_DELAYS = (2, 5, 10, 20, 30)  # seconds to wait before each retry; the last one is the final try
-MAX_RETRY_AFTER = 60  # never wait longer than this because a server asked us to
+MAX_RETRY_AFTER = 60  # a server asking for longer than this is not waited for: the request fails at once
 
 
 nws_state = {"down": False}  # set once the NWS has refused us after every retry, so later rivers skip it
@@ -89,7 +89,11 @@ nws_state = {"down": False}  # set once the NWS has refused us after every retry
 
 def get(url, params):
     """GET with retries. A rate-limited (429) or briefly failing service gets a few more tries, waiting
-    as long as it asks (Retry-After) or the next backoff step; any other error is raised at once."""
+    as long as it asks (Retry-After) or the next backoff step; any other error is raised at once.
+
+    A service that asks for more than MAX_RETRY_AFTER seconds (the USGS does, once its hourly limit is
+    used up: about 12 minutes) is not retried, since the retries would all fail. The error says how long
+    to wait instead."""
     for delay in (*RETRY_DELAYS, None):
         r = session.get(url, params=params, timeout=60)
         if r.status_code not in RETRY_STATUSES or delay is None:
@@ -99,7 +103,11 @@ def get(url, params):
             asked = float(r.headers.get("Retry-After", ""))
         except ValueError:
             asked = 0
-        wait = min(max(delay, asked), MAX_RETRY_AFTER)
+        if asked > MAX_RETRY_AFTER:
+            raise requests.HTTPError(
+                f"{r.status_code} from {url.split('?')[0]}: the service asks to wait {asked:g} s "
+                f"(about {asked / 60:.0f} minutes) before trying again", response=r)
+        wait = max(delay, asked)
         print(f"  {r.status_code} from {url.split('?')[0]}; retrying in {wait:g} s", file=sys.stderr)
         time.sleep(wait)
 
@@ -190,11 +198,16 @@ def resolve_anchor(river, state=None, list_only=False):
     sys.exit(f"Found gages for '{river}' but none are in the NLDI network; pass --anchor.")
 
 
-def fetch_river(anchor, distance_km):
+def fetch_river(anchor, distance_km, paths=None, comids=None):
     """Return (flowline features, {site_id: (name, lat, lon)}) up and downstream of anchor.
 
     Only gages on the anchor's own mainstem are kept, so gages on a river that the
     downstream walk runs into (past the mouth/confluence) are not shown as part of this one.
+
+    If `paths` is a dict, every flowline the walks return is also recorded in it, by comid, including
+    the stretch past the mouth that is not drawn. That is what find_confluences needs, and it comes for
+    free here, so it never has to be downloaded a second time. If `comids` is a dict, the flowline each
+    gage sits on is recorded in it ({site: comid}), to tell the gages above a confluence from those below.
     """
     base = f"{NLDI}/USGS-{anchor}/navigation"
     mainstem = get_json(f"{NLDI}/USGS-{anchor}", f="json")["features"][0]["properties"].get("mainstem")
@@ -210,29 +223,20 @@ def fetch_river(anchor, distance_km):
                 continue
             lon, lat = f["geometry"]["coordinates"]
             found[site] = (props["name"], lat, lon)
-        if mode == "DM" and not found:
-            continue  # nothing downstream on this river: don't draw the other river's line
+            if comids is not None:
+                comids[site] = props.get("comid")
+        draw = not (mode == "DM" and not found)  # nothing downstream on this river: don't draw the other river's line
+        if not draw and paths is None:
+            continue
         sites.update(found)
         for f in get_json(f"{base}/{mode}/flowlines", distance=distance_km, f="json")["features"]:
             comid = f["properties"].get("nhdplus_comid")
-            if comid not in seen:  # the anchor's flowline comes back from both walks
+            if paths is not None:
+                paths.setdefault(comid, f)
+            if draw and comid not in seen:  # the anchor's flowline comes back from both walks
                 seen.add(comid)
                 lines.append(f)
     return lines, sites
-
-
-def fetch_paths(anchor, distance_km):
-    """{comid: flowline feature} for the channel through anchor, up its main path and down it.
-
-    Unlike fetch_river this keeps everything the walks return, including the stretch past the mouth
-    that fetch_river leaves undrawn, because that is where one river runs into another.
-    """
-    paths = {}
-    for mode in ("UM", "DM"):
-        for f in get_json(f"{NLDI}/USGS-{anchor}/navigation/{mode}/flowlines",
-                          distance=distance_km, f="json")["features"]:
-            paths.setdefault(f["properties"].get("nhdplus_comid"), f)
-    return paths
 
 
 def _ends(feature):
@@ -245,7 +249,30 @@ def _ends(feature):
     return tuple(tuple(round(v, 6) for v in pt[:2]) for pt in (coords[0], coords[-1]))
 
 
-def find_confluences(paths):
+def downstream_of(features, node):
+    """The comids of the flowlines in `features` ({comid: flowline}) that run on down from `node`."""
+    starts = {}
+    for comid, f in features.items():
+        starts.setdefault(_ends(f)[0], []).append(comid)
+    below, todo = set(), [node]
+    while todo:
+        for comid in starts.get(todo.pop(), ()):
+            if comid not in below:
+                below.add(comid)
+                todo.append(_ends(features[comid])[1])
+    return below
+
+
+def fetch_drainage_areas(sites):
+    """{site: drainage area in square miles} for the sites that have one, in a single request."""
+    quoted = ",".join(f"'{site}'" for site in sites)
+    feats = get_json(MONITORING, f="json", limit=len(sites) + 1, filter=f"monitoring_location_number IN ({quoted})",
+                     **{"filter-lang": "cql-text"})["features"]
+    return {f["properties"]["monitoring_location_number"]: f["properties"]["drainage_area"]
+            for f in feats if f["properties"].get("drainage_area")}
+
+
+def find_confluences(paths, areas=None, detail=False):
     """Where the rivers in `paths` ({name: {comid: flowline}}) meet, as [{"lat", "lon", "rivers"}].
 
     Two rivers meet where their channels start to coincide: the upstream end of the stretch they
@@ -256,11 +283,17 @@ def find_confluences(paths):
 
     A river's path can run through a meeting it is no part of: Joshua Creek's walk goes down the Peace
     past where Horse Creek joins. Such a river arrives only on segments another river also arrives on,
-    and its path is the shorter one, and it has already met that river at a confluence of its own, so it
-    is dropped from this one. (Rivers NLDI files as one channel, like the Mahoning and the Beaver, never
-    meet each other, so they are all kept.)
+    and is the smaller of the two, and it has already met that river at a confluence of its own, so it
+    is dropped from this one. "Smaller" is by `areas` ({name: drainage area at the anchor}) when both
+    rivers have one, since a river's path is as long as its walk happened to be (the Susquehanna
+    anchored far downstream walks less far up than a tributary anchored nearer its mouth), and by the
+    number of flowlines walked otherwise. (Rivers NLDI files as one channel, like the Mahoning and the
+    Beaver, never meet each other, so they are all kept.)
+
+    With `detail`, each confluence also has "below": the comids of the stretch that runs on down from
+    it, which is how a gage below a meeting is told from one on a river's own side of it.
     """
-    found = []  # [lat, lon, [river names], {node keys}]
+    found = []  # [lat, lon, [river names], {node keys}, {comids below}]
     for a, b in combinations(paths, 2):
         pa, pb = paths[a], paths[b]
         shared = pa.keys() & pb.keys()
@@ -274,24 +307,35 @@ def find_confluences(paths):
             if first in shared_ends or first not in arrivals_a or first not in arrivals_b:
                 continue
             lon, lat = first
+            below = downstream_of({c: pa[c] for c in shared}, first)
             for hit in found:
                 if haversine_km(lat, lon, hit[0], hit[1]) <= CONFLUENCE_MERGE_KM:
                     hit[2].extend(n for n in (a, b) if n not in hit[2])
                     hit[3].add(first)
+                    hit[4] |= below
                     break
             else:
-                found.append([lat, lon, [a, b], {first}])
+                found.append([lat, lon, [a, b], {first}, set(below)])
+    areas = areas or {}
+
+    def smaller(n, o):
+        if areas.get(n) and areas.get(o):
+            return areas[n] < areas[o]
+        return len(paths[n]) < len(paths[o])
+
     out = []
-    for i, (lat, lon, names, nodes) in sorted(enumerate(found), key=lambda e: -e[1][0]):
+    for i, (lat, lon, names, nodes, below) in sorted(enumerate(found), key=lambda e: -e[1][0]):
         arrives = {n: {c for c, f in paths[n].items() if _ends(f)[1] in nodes} for n in names}
         # the pairs that also meet at some other confluence: those rivers have already joined
         elsewhere = {frozenset(pair) for j, other in enumerate(found) if j != i
                      for pair in combinations(other[2], 2)}
         keep = [n for n in names
-                if not any(arrives[n] <= arrives[o] and len(paths[n]) < len(paths[o])
+                if not any(arrives[n] <= arrives[o] and smaller(n, o)
                            and frozenset((n, o)) in elsewhere for o in names if o != n)]
         if len(keep) > 1:  # defensive: pruning should never leave a lone river, but that is no meeting
             out.append({"lat": lat, "lon": lon, "rivers": sorted(keep, key=list(paths).index)})
+            if detail:
+                out[-1]["below"] = sorted(below)
     return out
 
 
@@ -669,14 +713,18 @@ def pretty_name(name):
     return " ".join(words)
 
 
-def build_gages(anchor, distance_km, draw_retired=False, as_of=None):
+def build_gages(anchor, distance_km, draw_retired=False, as_of=None, paths=None, comids=None):
     """Return (flowlines, gages, retired). `retired` lists the sites that no longer report stage but
     once had a stage or flow record; it is only filled in when draw_retired is set.
 
     With `as_of` (an aware datetime) the gages are as they were at that moment. NWS forecasts are not
     kept for past times, so there are none; flood stages and the site catalog are today's.
+
+    If `paths` and `comids` are dicts they are filled with the river's flowlines and its gages' flowlines,
+    for find_confluences and nearest_gages (see fetch_river).
     """
-    lines, sites = fetch_river(anchor, distance_km)
+    extra = {k: v for k, v in (("paths", paths), ("comids", comids)) if v is not None}
+    lines, sites = fetch_river(anchor, distance_km, **extra)
     current = fetch_current(list(sites), as_of)
     not_reporting = [s for s in sites if s not in current]
     counts, retired = None, []
@@ -743,15 +791,28 @@ def build_gages(anchor, distance_km, draw_retired=False, as_of=None):
     return lines, sorted(gages, key=lambda g: -g["lat"]), retired
 
 
-def nearest_gages(confluence, gages_by_river):
-    """For each river at a confluence, its closest reporting gage as {"river", "site", "name", "km"}."""
+def nearest_gages(confluence, gages_by_river, comids=None):
+    """For each river at a confluence, its closest reporting gage as {"river", "site", "name", "km"}.
+
+    A river's walk carries on below the meeting, so its gages include ones on the river it joined or
+    formed (the Allegheny's include the Ohio's). "Nearest on each river" means on its own side, above
+    the meeting: gages on the stretch listed in the confluence's "below" (by `comids`, {river: {site:
+    flowline}}) are only used when a river has none above, and are then marked "below": True.
+    """
+    below = set(confluence.get("below", ()))
     out = []
     for river in confluence["rivers"]:
         gages = gages_by_river.get(river, [])
-        if gages:
+        flowline = (comids or {}).get(river, {})
+        above = [g for g in gages if flowline.get(g["site"]) not in below]
+        pool = above or gages
+        if pool:
             km, g = min(((haversine_km(confluence["lat"], confluence["lon"], g["lat"], g["lon"]), g)
-                         for g in gages), key=lambda t: t[0])
-            out.append({"river": river, "site": g["site"], "name": g["name"], "km": round(km, 1)})
+                         for g in pool), key=lambda t: t[0])
+            entry = {"river": river, "site": g["site"], "name": g["name"], "km": round(km, 1)}
+            if not above:
+                entry["below"] = True
+            out.append(entry)
     return out
 
 
@@ -765,11 +826,13 @@ def build_rivers(anchors, labels, distance_km, draw_retired=False, as_of=None):
     """
     if len(anchors) == 1:
         return (*build_gages(anchors[0], distance_km, draw_retired, as_of), [])
-    lines, gages, retired, by_river, seen = [], {}, {}, {}, set()
+    lines, gages, retired, by_river, paths, flowlines, seen = [], {}, {}, {}, {}, {}, set()
     for anchor, label in zip(anchors, labels):
         print(f"\n{label}:", file=sys.stderr)
+        river_paths, river_comids = {}, {}
         try:
-            river_lines, river_gages, river_retired = build_gages(anchor, distance_km, draw_retired, as_of)
+            river_lines, river_gages, river_retired = build_gages(
+                anchor, distance_km, draw_retired, as_of, paths=river_paths, comids=river_comids)
         except SystemExit as err:
             if not isinstance(err.code, str):
                 raise
@@ -788,21 +851,26 @@ def build_rivers(anchors, labels, distance_km, draw_retired=False, as_of=None):
         for g in river_retired:
             retired.setdefault(g["site"], g)
         by_river[label] = river_gages
+        paths[label] = river_paths
+        flowlines[label] = river_comids
     if not by_river:
         sys.exit("None of these rivers has a gage reporting recent gage height (parameter 00065).")
     retired = [g for site, g in retired.items() if site not in gages]
     confluences = []
     if len(by_river) > 1:
         try:
-            wanted = [(anchor, label) for anchor, label in zip(anchors, labels) if label in by_river]
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                paths = dict(zip((label for _, label in wanted),
-                                 pool.map(lambda al: fetch_paths(al[0], distance_km), wanted)))
-            confluences = find_confluences(paths)
-        except (requests.RequestException, KeyError, ValueError, IndexError, TypeError) as err:
+            site_of = {label: anchor for anchor, label in zip(anchors, labels)}
+            try:
+                by_site = fetch_drainage_areas([site_of[label] for label in by_river])
+            except (requests.RequestException, KeyError, ValueError):
+                by_site = {}  # the rule then falls back to how far each walk went
+            confluences = find_confluences(
+                paths, {label: by_site.get(site_of[label]) for label in by_river}, detail=True)
+        except (KeyError, ValueError, IndexError, TypeError) as err:  # a flowline in an unexpected shape
             print(f"Could not look for confluences: {err}", file=sys.stderr)
         for c in confluences:
-            c["nearest"] = nearest_gages(c, by_river)
+            c["nearest"] = nearest_gages(c, by_river, flowlines)
+            c.pop("below", None)  # only needed to choose the gages; not for the page
     return (lines, sorted(gages.values(), key=lambda g: -g["lat"]),
             sorted(retired, key=lambda g: -g["lat"]), confluences)
 
@@ -1101,7 +1169,7 @@ function confluencePopup(c) {
   const names = c.rivers.map(esc), last = names.pop();
   const meet = names.length ? `${names.join(", ")} and ${last}` : last;
   const rows = (c.nearest || []).map(n =>
-    `<tr><td>${esc(n.river)}</td><td>${esc(n.name)}<br><span class="sub">USGS ${esc(n.site)}, ${n.km} km away</span></td></tr>`).join("");
+    `<tr><td>${esc(n.river)}</td><td>${esc(n.name)}<br><span class="sub">USGS ${esc(n.site)}, ${n.km} km away${n.below ? ", below the confluence" : ""}</span></td></tr>`).join("");
   return `<div class="pop"><b>River confluence</b><br>${meet} meet here.` +
          (rows ? `<br><span class="cap">Nearest gage on each:</span><table>${rows}</table>` : "") + "</div>";
 }

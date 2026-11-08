@@ -69,6 +69,9 @@ The same river at six moments of the storm, from the first rise to Arcadia crest
 on its own page:
 [Arcadia, November 2026: a storm in six frames](docs/arcadia-nov-2026.md).
 
+Several rivers can share one map, with a ring where they meet, as in
+[Where Pittsburgh's rivers meet](docs/pittsburgh-confluences.md).
+
 ## 1. Set up
 
 This project uses [pixi](https://pixi.sh) to manage its environment (Python 3.10 or newer and the
@@ -378,13 +381,24 @@ candidates for every name.
 **Confluences.** Where the rivers meet, the map puts a purple ring. Its popup names the rivers that
 meet there and the nearest gage on each, with its distance. Rivers that join at one place (Shenango,
 Mahoning and Beaver) give one marker naming all of them. The markers are a layer you can switch off,
-and the terminal output lists them with their coordinates.
+and the terminal output lists them with their coordinates. For an example with pictures, see
+[Where Pittsburgh's rivers meet](docs/pittsburgh-confluences.md).
 
 A confluence is where two rivers' channels begin to coincide: the upstream end of the stretch they
 share, provided each river arrives there on a segment of its own. Looking at where the channels
 overlap means two rivers meet even if the river they form is not on your list, as the Shenango and
-Mahoning do at the start of the Beaver. It is worked out from the NLDI flowlines, which cost two more
-requests per river. If that lookup fails, you still get the map, without the markers.
+Mahoning do at the start of the Beaver. It is worked out from the NLDI flowlines the walks already
+download, so it costs no extra requests for them, plus one request for the rivers' drainage areas (see
+below). If something goes wrong in that step you still get the map, without the markers.
+
+**Which river is named.** A river's walk can run through a meeting it is no part of: the Susquehanna
+gage is far downstream, and its walk goes down past every tributary's mouth. At a meeting, a river that
+only passes through (it arrives on the same segment as a bigger river, and has already met it
+somewhere upstream) is left out, so the marker names the river that really is there. "Bigger" is the
+drainage area at the anchor gage, one batched USGS request. The walk length would be a poor judge,
+since it depends on where you happened to anchor: by walk length the West Branch of the Susquehanna
+would be named at the Juniata, because its gage is nearer its mouth than the Susquehanna's. If the
+areas are unavailable, the walk length is used.
 
 Things to know:
 
@@ -392,15 +406,30 @@ Things to know:
   gages below the join count for both rivers. The nearest gage to a confluence can be on the river
   it formed rather than on the one you named.
 - **Only your rivers.** A confluence is marked only where two of the rivers you listed meet. A
-  tributary you did not name is not drawn, and does not get a marker.
+  tributary you did not name is not drawn, and does not get a marker. The place is still right when the
+  river they form is not listed, but the name is borrowed: with the Allegheny, Monongahela and Beaver
+  listed, the marker where the Beaver joins the Ohio says "Allegheny River and Beaver River", the
+  bigger of the two rivers that make the Ohio. List the Ohio and it says "Ohio River and Beaver River".
+- **One channel, two names.** NLDI files the Ohio's upstream channel under the Allegheny, as it does
+  the Beaver's under the Mahoning, so either name can appear where the channel is the same. The place
+  of each marker does not depend on this, only the name beside it.
 - **A long run.** Every river does its own gage lookups, so a run takes about as long per river as it
   does alone.
 - **Rate limits.** The services sometimes answer "too many requests" (HTTP 429), the NWS most often,
   and more so when several rivers make many requests in a row. The tool waits and retries (2, 5, 10, 20
   and 30 seconds, or as long as the service asks, up to a minute) for 429 and 502, 503 or 504 answers;
-  other errors are not retried. If the NWS still refuses after that, the run does not stop: the rest of it skips the NWS, and the gages are colored by percentile with no flood
-  categories or forecasts, with a message saying so. Run it again later for those. A river that fails
-  for any other network reason (including an NWS error that is not a refusal) is skipped with a warning and the others are still drawn.
+  other errors are not retried. If the NWS still refuses after that, the run does not stop: the rest
+  of it skips the NWS, and the gages are colored by percentile with no flood categories or forecasts,
+  with a message saying so. Run it again later for those. A river that fails for any other network
+  reason (including an NWS error that is not a refusal) is skipped with a warning and the others are
+  still drawn.
+- **Checked on real river systems.** The confluence rules were run on the Shenango, Mahoning and
+  Beaver; the Peace and its creeks; the Allegheny, Monongahela, Youghiogheny, Kiskiminetas, Ohio and
+  Beaver around Pittsburgh; and the Susquehanna with the West Branch, Juniata and Swatara. For the
+  Pittsburgh and Susquehanna systems, every junction was found within about 2.5 km of the town it is
+  at (compared with rough coordinates for each town); the Peace's creeks and the start of the Beaver
+  were checked against the map by eye. The flowlines for these are recorded in
+  `tests/fixtures/nldi_paths.json`, so the tests check them without the network.
 
 ### Basemaps
 
