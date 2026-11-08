@@ -152,24 +152,24 @@ def find_candidates(river, state=None):
     """Stream gages whose USGS name starts with the river name, as dicts, largest basin first.
 
     The name filter is case-sensitive and USGS is inconsistent (Florida names are upper case,
-    Pennsylvania's are mixed), so the name is tried as typed, in title case and in upper case.
+    Pennsylvania's are mixed), so the one query asks for the name as typed, in title case and in
+    upper case, joined with OR. (Three queries, or two, used up the API's hourly limit quickly.)
     """
     river = river.strip()
-    out, seen = [], set()
-    for name in dict.fromkeys([river, river.title(), river.upper()]):
-        params = {"f": "json", "limit": 1000, "site_type_code": "ST",
-                  "filter": f"monitoring_location_name LIKE '{name.replace(chr(39), chr(39) * 2)} %'",
-                  "filter-lang": "cql-text"}
-        if state:
-            params["state_name"] = STATES.get(state.upper(), state.title())
-        for f in get_json(MONITORING, **params)["features"]:
-            p = f["properties"]
-            site = p["monitoring_location_number"]
-            if len(site) != 8 or site in seen:  # skip miscellaneous/project sites
-                continue
-            seen.add(site)
-            out.append({"site": site, "name": p["monitoring_location_name"],
-                        "state": p["state_name"], "area": p["drainage_area"]})
+    likes = [f"monitoring_location_name LIKE '{name.replace(chr(39), chr(39) * 2)} %'"
+             for name in dict.fromkeys([river, river.title(), river.upper()])]
+    params = {"f": "json", "limit": 1000, "site_type_code": "ST",
+              "filter": " OR ".join(likes), "filter-lang": "cql-text"}
+    if state:
+        params["state_name"] = STATES.get(state.upper(), state.title())
+    out = []
+    for f in get_json(MONITORING, **params)["features"]:
+        p = f["properties"]
+        site = p["monitoring_location_number"]
+        if len(site) != 8:  # skip miscellaneous/project sites
+            continue
+        out.append({"site": site, "name": p["monitoring_location_name"],
+                    "state": p["state_name"], "area": p["drainage_area"]})
     return sorted(out, key=lambda c: -(c["area"] or 0))
 
 

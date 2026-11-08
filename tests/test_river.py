@@ -39,24 +39,46 @@ class TestFindCandidates:
     def test_builds_the_name_filter(self, route):
         calls = route({sg.MONITORING: monitoring()})
         sg.find_candidates("  Peace River ")
-        filters = [params["filter"] for _, params in calls]
-        # The filter is case-sensitive and USGS names are upper case in some states, mixed in others
-        assert filters == ["monitoring_location_name LIKE 'Peace River %'",
-                           "monitoring_location_name LIKE 'PEACE RIVER %'"]
-        for _, params in calls:
-            assert params["site_type_code"] == "ST"
-            assert "state_name" not in params
+        # The filter is case-sensitive and USGS names are upper case in some states, mixed in others,
+        # so both spellings go in one query
+        assert len(calls) == 1
+        _, params = calls[0]
+        assert params["filter"] == ("monitoring_location_name LIKE 'Peace River %' "
+                                    "OR monitoring_location_name LIKE 'PEACE RIVER %'")
+        assert params["filter-lang"] == "cql-text"
+        assert params["site_type_code"] == "ST"
+        assert "state_name" not in params
 
-    def test_apostrophes_are_escaped_in_the_filter(self, route):
+    @pytest.mark.parametrize("name, spellings", [
+        ("Peace River", ["Peace River", "PEACE RIVER"]),                  # typed as USGS mixes it: two spellings
+        ("PEACE RIVER", ["PEACE RIVER", "Peace River"]),                  # typed in capitals: still both
+        ("mckenzie river", ["mckenzie river", "Mckenzie River", "MCKENZIE RIVER"]),  # three differ
+    ])
+    def test_every_spelling_is_asked_for_in_a_single_request(self, route, name, spellings):
+        calls = route({sg.MONITORING: monitoring()})
+        sg.find_candidates(name)
+        assert len(calls) == 1
+        likes = calls[0][1]["filter"].split(" OR ")
+        assert likes == [f"monitoring_location_name LIKE '{s} %'" for s in spellings]
+
+    def test_a_state_does_not_add_a_request(self, route):
+        calls = route({sg.MONITORING: monitoring()})
+        sg.find_candidates("Little River", "NC")
+        assert len(calls) == 1 and calls[0][1]["state_name"] == "North Carolina"
+
+    def test_apostrophes_are_escaped_in_every_spelling(self, route):
         calls = route({sg.MONITORING: monitoring()})
         sg.find_candidates("St. Mary's River")
-        assert all("''s" in params["filter"].lower() for _, params in calls)
-        likes = [params["filter"].split(" LIKE ")[1] for _, params in calls]
-        assert "'ST. MARY''S RIVER %'" in likes
+        likes = calls[0][1]["filter"].split(" OR ")
+        # as typed, str.title() (which capitalizes after an apostrophe: an odd but harmless extra
+        # spelling), and upper case; the apostrophe is doubled in each
+        assert likes == ["monitoring_location_name LIKE 'St. Mary''s River %'",
+                         "monitoring_location_name LIKE 'St. Mary''S River %'",
+                         "monitoring_location_name LIKE 'ST. MARY''S RIVER %'"]
 
     def test_finds_mixed_case_names(self, route):
-        # Pennsylvania spells it "Shenango River at ...", Florida "PEACE RIVER AT ..."; the stub
-        # returns the same rows for every variant, so they must not be listed twice
+        # Pennsylvania spells it "Shenango River at ...", Florida "PEACE RIVER AT ...": a name typed
+        # in lower case still finds the mixed-case gage
         route({sg.MONITORING: monitoring(
             ("03103500", "Shenango River at Sharpsville, PA", "Pennsylvania", 584.0))})
         assert [c["site"] for c in sg.find_candidates("shenango river")] == ["03103500"]
