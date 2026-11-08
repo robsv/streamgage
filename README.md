@@ -150,6 +150,8 @@ number at the end of the page URL is the site number. For example, `USGS-0229675
 **What the name lookup does.**
 
 1. It searches USGS stream gages whose name starts with the river name, such as `PEACE RIVER AT ...`.
+   USGS capitalizes names differently from state to state (`Shenango River at ...` in Pennsylvania), so
+   one request asks for the name as you typed it, in title case and in upper case.
 2. If the matches are in more than one state, it stops and asks for `--state`.
 3. It uses the matching gage with the largest drainage area as the anchor. That gage is at the
    downstream end of the river, so walking upstream from it covers the whole river.
