@@ -100,7 +100,7 @@ first run creates the environment. The script prints a summary table to the term
 web, so you need an internet connection to view it.
 
 ```
-pixi run map [river ...] [--state STATE] [--anchor SITE ...] [--list] [--distance MILES] [--retired] [--as-of TIME] [--out PATH]
+pixi run map [river ...] [--state STATE] [--anchor SITE ...] [--list] [--distance MILES] [--retired] [--as-of TIME] [--name NAME] [--out PATH]
 ```
 
 Options (`--help` lists them all):
@@ -114,7 +114,8 @@ Options (`--help` lists them all):
 | `--distance` | Miles to walk upstream and downstream of the anchor. Default: `200`. |
 | `--retired` | Also draw gages that no longer report stage (retired, or offline) as faint markers in a layer you can switch off. See [Sites that are not on the map](#sites-that-are-not-on-the-map). |
 | `--as-of` | Show the river as it was at a past moment: an ISO 8601 time with its UTC offset, such as `2026-11-03T12:00-05:00` or `2026-11-03T17:00Z`. See [The river at a past moment](#the-river-at-a-past-moment). |
-| `--out` | Output HTML path. Default: the river name with underscores plus `_gages.html` (`usgs_<site>_gages.html` when only `--anchor` is given). With `--as-of`, the moment is added to the name (`peace_river_2026-11-03_1200_gages.html`), so a past map never overwrites the current one. |
+| `--name` | A name for the map, such as `"Pittsburgh rivers"`: it becomes the page title and the start of the file name (`pittsburgh_rivers_gages.html`). Handy with several rivers, whose default names run long (see [Several rivers at once](#several-rivers-at-once)). |
+| `--out` | Output HTML path. Default: the river name with underscores plus `_gages.html` (`usgs_<site>_gages.html` when only `--anchor` is given); for several rivers see [Several rivers at once](#several-rivers-at-once). With `--as-of`, the moment is added to the name (`peace_river_2026-11-03_1200_gages.html`), so a past map never overwrites the current one. |
 
 At least one of `river` or `--anchor` is required.
 
@@ -375,8 +376,16 @@ system fits together. `--state` applies to every name. To use sites instead of n
 and leave the names off (`--anchor 03104515 --anchor 03099695`). Each river is built the way it is on
 its own (its own anchor and its own walk up and down), then the results are merged: a gage or flowline
 that two rivers share appears once. A river with no gage reporting stage is skipped with a warning
-rather than stopping the run, and the title is the names joined with " + ". `--list` shows the
-candidates for every name.
+rather than stopping the run, and the title is the names joined with " + " (or `--name`, if you give
+one). `--list` shows the candidates for every name.
+
+**File names.** The default file name would run long with many rivers, so it is shortened. With two or
+three rivers it has the names without a trailing "River" (`shenango_mahoning_beaver_gages.html`; a
+"Creek" stays). With more, it has the first three, "plus" the number left out, and six hex digits made
+from the rivers' sites (`allegheny_monongahela_youghiogheny_plus_3_dd9d1c_gages.html`). The digits
+keep different sets of rivers from sharing a file, and give the same set the same file every time, so a
+rerun replaces its own map. A single river keeps its whole name. `--name` replaces all of this
+(`--name pittsburgh` gives `pittsburgh_gages.html`), and `--out` sets the path outright.
 
 **Confluences.** Where the rivers meet, the map puts a purple ring. Its popup names the rivers that
 meet there and the nearest gage on each, with its distance. Rivers that join at one place (Shenango,

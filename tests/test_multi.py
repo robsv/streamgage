@@ -635,3 +635,119 @@ class TestCommandLine:
         with pytest.raises(SystemExit) as exc:
             sg.main()
         assert listed == ["A River", "B River"] and exc.value.code == 0
+
+
+SIX = ["Allegheny River", "Monongahela River", "Youghiogheny River", "Kiskiminetas River", "Beaver River",
+       "Ohio River"]
+SITES = ["03049828", "03085140", "03083900", "03048600", "03107500", "03108500"]
+
+
+class TestFileStem:
+    def test_one_river_keeps_its_whole_name(self):
+        assert sg.file_stem(["Peace River"], ["02298300"]) == "peace_river"
+        assert sg.file_stem(["St. Mary's River"], ["1"]) == "st_mary_s_river"
+
+    def test_a_few_rivers_drop_the_word_river(self):
+        assert sg.file_stem(["Shenango River", "Mahoning River"], ["1", "2"]) == "shenango_mahoning"
+        assert sg.file_stem(SIX[:3], SITES[:3]) == "allegheny_monongahela_youghiogheny"
+
+    def test_only_a_trailing_river_is_dropped_and_other_words_stay(self):
+        assert sg.file_stem(["Peace River", "Horse Creek"], ["1", "2"]) == "peace_horse_creek"
+        assert sg.file_stem(["River Raisin", "Peace River"], ["1", "2"]) == "river_raisin_peace"
+        assert sg.file_stem(["River", "Peace River"], ["1", "2"]) == "river_peace"  # nothing left otherwise
+        assert sg.file_stem(["peace RIVER", "horse creek"], ["1", "2"]) == "peace_horse_creek"
+        assert sg.file_stem(["Peace River Fork", "Horse Creek"], ["1", "2"]) == "peace_river_fork_horse_creek"
+
+    def test_a_name_that_is_nothing_but_river_once_it_is_dropped_keeps_its_word(self):
+        assert sg.file_stem(["- River", "Peace River"], ["1", "2"]) == "river_peace"
+
+    def test_anchor_labels_are_kept_whole(self):
+        assert sg.file_stem(["USGS 03104515", "USGS 03099695"], ["03104515", "03099695"]) == \
+            "usgs_03104515_usgs_03099695"
+
+    def test_three_rivers_is_the_most_that_are_all_named(self):
+        assert sg.MAX_NAMES_IN_FILE == 3
+        assert "plus" not in sg.file_stem(SIX[:3], SITES[:3])
+        assert "_plus_1_" in sg.file_stem(SIX[:4], SITES[:4])
+
+    def test_more_than_that_gives_the_first_three_a_count_and_a_hash(self):
+        stem = sg.file_stem(SIX, SITES)
+        assert re.fullmatch(r"allegheny_monongahela_youghiogheny_plus_3_[0-9a-f]{6}", stem)
+
+    def test_the_hash_is_the_same_for_the_same_rivers_and_different_for_others(self):
+        same = sg.file_stem(SIX, SITES) == sg.file_stem(list(SIX), list(SITES))
+        other_site = sg.file_stem(SIX, SITES[:-1] + ["03108501"])
+        other_last = sg.file_stem(SIX[:-1] + ["Muskingum River"], SITES[:-1] + ["03150000"])
+        assert same and other_site != sg.file_stem(SIX, SITES) != other_last
+
+    def test_the_hash_tells_apart_sets_that_share_their_first_three(self):
+        a = sg.file_stem(SIX[:3] + ["A River", "B River"], SITES[:3] + ["1", "2"])
+        b = sg.file_stem(SIX[:3] + ["A River", "B River"], SITES[:3] + ["1", "3"])
+        assert a.rsplit("_", 1)[0] == b.rsplit("_", 1)[0] and a != b
+
+    def test_six_rivers_make_a_short_file_name(self):
+        assert len(sg.file_stem(SIX, SITES) + "_gages.html") < 65  # it was 106
+
+
+class TestFileNames:
+    """What main() calls the file when --out is not given."""
+
+    @pytest.fixture
+    def run(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sg, "resolve_anchor", lambda name, state=None, list_only=False: f"id:{name}")
+        monkeypatch.setattr(sg, "build_rivers", lambda anchors, labels, km, draw=False, as_of=None: (
+            [], [gage()], [], []))
+
+        def go(*argv):
+            monkeypatch.setattr("sys.argv", ["streamgage.py", *argv])
+            sg.main()
+            return sorted(p.name for p in tmp_path.glob("*.html"))
+        return go
+
+    def test_two_rivers(self, run):
+        assert run("Shenango River", "Mahoning River") == ["shenango_mahoning_gages.html"]
+
+    def test_six_rivers(self, run):
+        names = ["Allegheny River", "Monongahela River", "Youghiogheny River", "Kiskiminetas River",
+                 "Beaver River", "Ohio River"]
+        (name,) = run(*names)
+        assert re.fullmatch(r"allegheny_monongahela_youghiogheny_plus_3_[0-9a-f]{6}_gages\.html", name)
+
+    def test_one_river_is_named_as_it_always_was(self, run):
+        assert run("Peace River") == ["peace_river_gages.html"]
+
+    def test_the_moment_still_comes_last(self, run):
+        assert run("Shenango River", "Mahoning River", "--as-of", "2026-11-03T12:00-05:00") == \
+            ["shenango_mahoning_2026-11-03_1200_gages.html"]
+
+    def test_the_page_title_still_lists_every_river(self, run, tmp_path):
+        run("Shenango River", "Mahoning River")
+        page = (tmp_path / "shenango_mahoning_gages.html").read_text(encoding="utf-8")
+        assert "<title>Shenango River + Mahoning River stream gages</title>" in page
+
+    def test_name_gives_the_file_and_the_title(self, run, tmp_path):
+        assert run("Shenango River", "Mahoning River", "Beaver River", "--name", "Pittsburgh rivers") == \
+            ["pittsburgh_rivers_gages.html"]
+        page = (tmp_path / "pittsburgh_rivers_gages.html").read_text(encoding="utf-8")
+        assert "<title>Pittsburgh rivers stream gages</title>" in page
+        assert 'const TITLE = "Pittsburgh rivers";' in page
+
+    def test_name_is_trimmed_and_works_for_one_river(self, run, tmp_path):
+        assert run("Peace River", "--name", "  The Peace  ") == ["the_peace_gages.html"]
+        page = (tmp_path / "the_peace_gages.html").read_text(encoding="utf-8")
+        assert "<title>The Peace stream gages</title>" in page and 'const TITLE = "The Peace";' in page
+
+    def test_name_keeps_the_moment_too(self, run):
+        assert run("Peace River", "--name", "Arcadia", "--as-of", "2026-11-03T12:00-05:00") == \
+            ["arcadia_2026-11-03_1200_gages.html"]
+
+    def test_out_decides_the_file_and_name_still_decides_the_title(self, run, tmp_path):
+        assert run("Peace River", "--name", "Arcadia", "--out", str(tmp_path / "x.html")) == ["x.html"]
+        assert "<title>Arcadia stream gages</title>" in (tmp_path / "x.html").read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("bad", ["", "  ", "!!!", "..."])
+    def test_a_name_with_no_letters_or_digits_is_refused(self, run, capsys, bad):
+        with pytest.raises(SystemExit):
+            run("Peace River", "--name", bad)
+        assert "--name needs at least one letter or digit" in capsys.readouterr().err

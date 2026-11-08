@@ -23,6 +23,7 @@ Examples:
 """
 
 import argparse
+import hashlib
 import html
 import json
 import math
@@ -68,6 +69,7 @@ FLOOD_CATEGORIES = ("action", "minor", "moderate", "major")  # the ones the page
 MATCH_RADIUS_KM = 0.5  # max distance between a USGS site and its NWS gauge
 CONFLUENCE_MERGE_KM = 0.5  # confluence points closer than this are one meeting of rivers
 KM_PER_MILE = 1.609344  # distances are shown in miles; --distance is in miles and the NLDI API takes whole kilometers
+MAX_NAMES_IN_FILE = 3  # more rivers than this and the file name gives the first few, "plus N" and a hash
 RECENT_DAYS = 7  # window for range position, peak and the recent sparkline
 TREND_HOURS = 6  # window for the rate-of-change fit
 MIN_RECENT_POINTS = 12  # fewer instantaneous readings than this and the recent stats are skipped
@@ -1232,6 +1234,28 @@ title.addTo(map);
 """
 
 
+def slug(text):
+    """Lower case, with every run of other characters as one underscore: a safe piece of a file name."""
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def file_stem(labels, anchors):
+    """The default file name, without the "_gages.html", for a map of these rivers.
+
+    One river: its name. A few: the names, each without a trailing "River" (it says nothing the rest
+    of the name doesn't). More than MAX_NAMES_IN_FILE: the first few, then "plus N" and six hex digits
+    from the sites, so a different set of rivers never shares a file with this one and the same set
+    always does (a rerun replaces its own map).
+    """
+    if len(labels) == 1:
+        return slug(labels[0])
+    short = [slug(re.sub(r"\s+river$", "", label, flags=re.IGNORECASE)) or slug(label) for label in labels]
+    if len(short) <= MAX_NAMES_IN_FILE:
+        return "_".join(short)
+    digest = hashlib.sha1("|".join(anchors).encode()).hexdigest()[:6]
+    return "_".join(short[:MAX_NAMES_IN_FILE]) + f"_plus_{len(short) - MAX_NAMES_IN_FILE}_{digest}"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("river", nargs="*", help="river name as USGS spells it, e.g. 'Myakka River'; "
@@ -1247,8 +1271,13 @@ def main():
     ap.add_argument("--as-of", metavar="TIME", dest="as_of",
                     help="show the river as it was at a past moment, an ISO 8601 time with its UTC offset, "
                          "e.g. 2026-11-03T12:00-05:00 (no NWS forecasts for past times)")
+    ap.add_argument("--name", help="a name for the map, such as 'Pittsburgh rivers': its title and the start of "
+                    "the file name (several rivers make a long default name)")
     ap.add_argument("--out", default=None, help="output HTML path")
     args = ap.parse_args()
+    name = args.name.strip() if args.name else None
+    if args.name is not None and not slug(args.name):
+        ap.error("--name needs at least one letter or digit")
     if not args.river and not args.anchor:
         ap.error("give a river name or --anchor")
 
@@ -1283,10 +1312,10 @@ def main():
     for anchor, label in zip(anchors, labels):
         seen.setdefault(anchor, label)
     anchors, labels = list(seen), list(seen.values())
-    title = " + ".join(labels)
+    title = name or " + ".join(labels)
     lines, gages, retired, confluences = build_rivers(
         anchors, labels, round(args.distance * KM_PER_MILE), args.retired, as_of)
-    stem = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") + (f"_{as_of:%Y-%m-%d_%H%M}" if as_of else "")
+    stem = (slug(name) if name else file_stem(labels, anchors)) + (f"_{as_of:%Y-%m-%d_%H%M}" if as_of else "")
     out = args.out or f"{stem}_gages.html"
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
