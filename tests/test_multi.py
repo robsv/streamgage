@@ -2,8 +2,6 @@
 
 import json
 import re
-import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -11,6 +9,7 @@ import requests
 
 import streamgage as sg
 from tests.conftest import gage
+from tests.test_river import monitoring
 
 
 def seg(comid, *pts, kind="LineString"):
@@ -129,55 +128,273 @@ class TestFindConfluences:
         assert sg.find_confluences({"A": paths(A_ONLY, *SHARED)}) == []
 
 
-def recorded(region):
-    """Flowline paths recorded from NLDI (trimmed to each segment's comid and end points) for a set
-    of rivers, in the shape fetch_paths returns."""
+def recorded(region, only=None):
+    """(paths, drainage areas) recorded from NLDI and the USGS for the rivers of a region, in the shapes
+    fetch_river and fetch_drainage_areas give. The flowlines are trimmed to each segment's comid and end
+    points; `only` limits it to some of the rivers."""
     data = json.loads((Path(__file__).parent / "fixtures" / "nldi_paths.json").read_text())[region]
-    return {name: {c: seg(c, (lon0, lat0), (lon1, lat1)) for c, lon0, lat0, lon1, lat1 in rows}
-            for name, rows in data.items()}
+    names = [n for n in data["rivers"] if only is None or n in only]
+    return ({name: {c: seg(c, (lon0, lat0), (lon1, lat1)) for c, lon0, lat0, lon1, lat1 in data["rivers"][name]}
+             for name in names},
+            {name: data["areas"][name] for name in names})
+
+
+def meetings(found):
+    """[((lat, lon) to 2 places, rivers)] for a list of confluences."""
+    return [((round(c["lat"], 2), round(c["lon"], 2)), c["rivers"]) for c in found]
 
 
 class TestRecordedRivers:
     """The rules were tuned on real flowlines, so keep real ones as a check that they still hold."""
 
-    def places(self, found):
-        return [((round(c["lat"], 2), round(c["lon"], 2)), c["rivers"]) for c in found]
-
     def test_pennsylvania_names_all_three_at_the_start_of_the_beaver(self):
-        found = sg.find_confluences(recorded("pennsylvania"))
-        assert self.places(found) == [((40.96, -80.38),
-                                       ["Shenango River", "Mahoning River", "Beaver River"])]
+        assert meetings(sg.find_confluences(*recorded("pennsylvania"))) == [
+            ((40.96, -80.38), ["Shenango River", "Mahoning River", "Beaver River"])]
 
     def test_the_florida_creeks_each_meet_the_peace_where_they_join_it(self):
-        found = sg.find_confluences(recorded("florida"))
-        assert self.places(found) == [((27.16, -81.90), ["Peace River", "Joshua Creek"]),
-                                      ((27.10, -81.99), ["Peace River", "Horse Creek"]),
-                                      ((26.98, -81.99), ["Peace River", "Shell Creek"])]
+        assert meetings(sg.find_confluences(*recorded("florida"))) == [
+            ((27.16, -81.90), ["Peace River", "Joshua Creek"]),
+            ((27.10, -81.99), ["Peace River", "Horse Creek"]),
+            ((26.98, -81.99), ["Peace River", "Shell Creek"])]
 
     def test_the_myakka_never_meets_the_peace(self):
-        assert all("Myakka River" not in c["rivers"] for c in sg.find_confluences(recorded("florida")))
+        assert all("Myakka River" not in c["rivers"] for c in sg.find_confluences(*recorded("florida")))
 
     def test_the_order_the_rivers_are_given_in_does_not_change_where_they_meet(self):
-        paths = recorded("florida")
+        paths, areas = recorded("florida")
         flipped = dict(reversed(list(paths.items())))
-        assert (sorted((round(c["lat"], 3), round(c["lon"], 3)) for c in sg.find_confluences(flipped))
-                == sorted((round(c["lat"], 3), round(c["lon"], 3)) for c in sg.find_confluences(paths)))
+        places = lambda found: sorted((round(c["lat"], 3), round(c["lon"], 3)) for c in found)
+        assert places(sg.find_confluences(flipped, areas)) == places(sg.find_confluences(paths, areas))
 
     def test_leaving_a_river_out_leaves_the_others_confluences(self):
-        paths = recorded("florida")
+        paths, areas = recorded("florida")
         del paths["Horse Creek"]
-        assert [c["rivers"] for c in sg.find_confluences(paths)] == [["Peace River", "Joshua Creek"],
-                                                                     ["Peace River", "Shell Creek"]]
+        assert [c["rivers"] for c in sg.find_confluences(paths, areas)] == [["Peace River", "Joshua Creek"],
+                                                                            ["Peace River", "Shell Creek"]]
+
+    def test_the_susquehanna_is_named_at_every_junction_not_its_longer_walking_tributary(self):
+        # the Susquehanna gage is far downstream, so its walk is shorter than the West Branch's;
+        # by path length the West Branch would be named at the Juniata and the Swatara
+        paths, areas = recorded("susquehanna")
+        assert meetings(sg.find_confluences(paths, areas)) == [
+            ((40.88, -76.80), ["Susquehanna River", "West Branch Susquehanna River"]),  # Northumberland
+            ((40.40, -77.02), ["Susquehanna River", "Juniata River"]),                  # Duncannon
+            ((40.18, -76.73), ["Susquehanna River", "Swatara Creek"])]                  # Middletown
+
+    def test_without_areas_the_longer_walk_wins_and_the_wrong_river_is_named(self):
+        # what the areas are for: the places are right either way, the names are not
+        paths, _ = recorded("susquehanna")
+        found = meetings(sg.find_confluences(paths))
+        assert [place for place, _ in found] == [(40.88, -76.80), (40.40, -77.02), (40.18, -76.73)]
+        assert found[1][1] == ["West Branch Susquehanna River", "Juniata River"]
+
+    def test_pittsburgh_has_the_four_junctions_where_they_are(self):
+        found = sg.find_confluences(*recorded("pittsburgh"))
+        assert [place for place, _ in meetings(found)] == [
+            (40.69, -80.29),  # the Beaver joins the Ohio at Rochester
+            (40.68, -79.67),  # the Kiskiminetas joins the Allegheny at Freeport
+            (40.44, -80.02),  # the Allegheny and the Monongahela make the Ohio at Pittsburgh
+            (40.36, -79.87)]  # the Youghiogheny joins the Monongahela at McKeesport
+
+    def test_with_the_ohio_listed_it_is_named_where_the_beaver_joins_it(self):
+        found = dict(meetings(sg.find_confluences(*recorded("pittsburgh"))))
+        assert found[(40.69, -80.29)] == ["Ohio River", "Beaver River"]
+        assert found[(40.36, -79.87)] == ["Monongahela River", "Youghiogheny River"]
+        assert "Monongahela River" in found[(40.44, -80.02)]
+
+    def test_without_the_ohio_the_bigger_basin_carries_through_to_the_beaver(self):
+        # the Beaver really meets the Ohio, which is not listed; the Allegheny (the bigger of the two
+        # rivers that make it) stands in. By path length it would have been the Monongahela.
+        rivers = ["Allegheny River", "Monongahela River", "Youghiogheny River", "Kiskiminetas River",
+                  "Beaver River"]
+        found = dict(meetings(sg.find_confluences(*recorded("pittsburgh", rivers))))
+        assert found[(40.69, -80.29)] == ["Allegheny River", "Beaver River"]
+        assert found[(40.44, -80.02)] == ["Allegheny River", "Monongahela River"]
+        assert found[(40.68, -79.67)] == ["Allegheny River", "Kiskiminetas River"]
 
 
-class TestFetchPaths:
-    def test_keeps_every_flowline_from_both_walks_once(self, route):
-        calls = route({"/UM/flowlines": {"features": [A_ONLY]},
-                       "/DM/flowlines": {"features": [A_ONLY, *SHARED]}})
-        got = sg.fetch_paths("03104515", 322)
-        assert sorted(got) == [1, 3, 4]
-        assert {url.split("/")[-2] for url, _ in calls} == {"UM", "DM"}
-        assert all(params["distance"] == 322 for _, params in calls)
+class TestBuildGagesPaths:
+    def test_the_paths_dict_reaches_fetch_river_and_comes_back_filled(self, monkeypatch):
+        seen = []
+
+        def fetch_river(anchor, km, paths=None):
+            seen.append(paths)
+            if paths is not None:
+                paths.update({1: "a flowline"})
+            return [], {}
+
+        monkeypatch.setattr(sg, "fetch_river", fetch_river)
+        mine = {}
+        with pytest.raises(SystemExit):  # no sites, so no gage reports: it stops after the walk
+            sg.build_gages("anchor", 322, paths=mine)
+        assert seen == [mine] and mine == {1: "a flowline"}
+
+    def test_the_comids_dict_reaches_fetch_river_and_comes_back_filled(self, monkeypatch):
+        seen = []
+
+        def fetch_river(anchor, km, paths=None, comids=None):
+            seen.append((paths, comids))
+            comids.update({"02296750": 111})
+            return [], {}
+
+        monkeypatch.setattr(sg, "fetch_river", fetch_river)
+        mine = {}
+        with pytest.raises(SystemExit):
+            sg.build_gages("anchor", 322, comids=mine)
+        assert seen == [(None, mine)] and mine == {"02296750": 111}
+
+    def test_without_paths_fetch_river_is_called_as_it_always_was(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(sg, "fetch_river", lambda *args, **kw: calls.append((args, kw)) or ([], {}))
+        with pytest.raises(SystemExit):
+            sg.build_gages("anchor", 322)
+        assert calls == [(("anchor", 322), {})]
+
+
+class TestDownstreamOf:
+    def test_follows_the_shared_stretch_on_down_from_the_node(self):
+        features = paths(*SHARED, seg(5, (-80.0, 40.7), (-80.0, 40.6)))
+        assert sg.downstream_of(features, JOIN) == {3, 4, 5}
+        assert sg.downstream_of(features, (-80.0, 40.8)) == {4, 5}  # from a node part way along
+
+    def test_leaves_out_what_lies_upstream_of_the_node(self):
+        features = paths(seg(9, (-80.0, 41.5), JOIN), *SHARED)
+        assert sg.downstream_of(features, JOIN) == {3, 4}
+
+    def test_a_fork_is_followed_down_both_branches(self):
+        # two flowlines leave the same node (a split channel): both branches count as below it
+        fork = seg(8, JOIN, (-80.1, 40.8)), seg(9, JOIN, (-79.9, 40.8)), seg(10, (-79.9, 40.8), (-79.9, 40.7))
+        assert sg.downstream_of(paths(*fork), JOIN) == {8, 9, 10}
+
+    def test_a_node_the_stretch_does_not_start_at_gives_nothing(self):
+        assert sg.downstream_of(paths(*SHARED), (-70.0, 30.0)) == set()
+
+
+class TestConfluenceBelow:
+    def test_the_stretch_below_a_confluence_is_listed_only_when_asked_for(self):
+        net = {"A": paths(A_ONLY, *SHARED), "B": paths(B_ONLY, *SHARED)}
+        assert "below" not in sg.find_confluences(net)[0]
+        assert sg.find_confluences(net, detail=True)[0]["below"] == [3, 4]
+
+    def test_a_shared_stretch_above_the_meeting_is_not_below_it(self):
+        # Mahoning and Beaver are one channel: the Shenango meets it at JOIN, and the part of the
+        # channel above JOIN, which the Beaver's walk also covers, must not count as below
+        upstream = seg(70, (-80.0, 41.5), (-80.0, 41.0))
+        a_only = seg(71, (-80.0, 41.0), JOIN)
+        mahoning = paths(upstream, a_only, *SHARED)
+        beaver = paths(upstream, a_only, *SHARED[:1])
+        found = sg.find_confluences({"Mahoning": mahoning, "Beaver": beaver, "Shenango": paths(B_ONLY, *SHARED)},
+                                    detail=True)
+        assert 70 not in found[0]["below"] and 71 not in found[0]["below"] and {3, 4} <= set(found[0]["below"])
+
+    def test_every_pair_that_meets_at_a_place_adds_its_stretch(self):
+        c_only = seg(5, (-79.9, 40.95), JOIN)
+        net = {"A": paths(A_ONLY, *SHARED), "B": paths(B_ONLY, *SHARED), "C": paths(c_only, *SHARED)}
+        assert sg.find_confluences(net, detail=True)[0]["below"] == [3, 4]
+
+    def test_a_confluence_found_by_several_pairs_keeps_the_longest_stretch_whichever_came_first(self):
+        # C's path shares only the first segment below the join with A, and A and B share two, so
+        # the pair that registers the place first (A and C) knows less than the pair that merges into it
+        c_only = seg(5, (-79.9, 40.95), JOIN)
+        net = {"A": paths(A_ONLY, *SHARED), "C": paths(c_only, SHARED[0]), "B": paths(B_ONLY, *SHARED)}
+        found = sg.find_confluences(net, detail=True)
+        assert [c["rivers"] for c in found] == [["A", "C", "B"]]
+        assert found[0]["below"] == [3, 4]
+
+    def test_a_stretch_the_two_rivers_also_share_somewhere_else_is_not_below_the_meeting(self):
+        # both walks start on the same flowline far away (it has no arrival of its own, so it is
+        # not a meeting): it is shared, but it is not downstream of the join
+        elsewhere = seg(80, (-75.0, 45.0), (-75.0, 44.9))
+        net = {"A": paths(elsewhere, A_ONLY, *SHARED), "B": paths(elsewhere, B_ONLY, *SHARED)}
+        found = sg.find_confluences(net, detail=True)
+        assert [(c["lat"], c["lon"]) for c in found] == [(40.9, -80.0)]
+        assert found[0]["below"] == [3, 4]
+
+    def test_on_the_recorded_pittsburgh_rivers_the_ohio_gage_is_below_and_the_allegheny_one_is_not(self):
+        rivers = ["Allegheny River", "Monongahela River", "Youghiogheny River", "Kiskiminetas River", "Beaver River"]
+        found = {round(c["lat"], 2): set(c["below"])
+                 for c in sg.find_confluences(*recorded("pittsburgh", rivers), detail=True)}
+        pittsburgh, rochester = found[40.44], found[40.69]
+        assert 3821269 in pittsburgh      # the Ohio River at Emsworth Dam: below the Allegheny and Monongahela
+        assert 11050716 not in pittsburgh  # the Allegheny River at Pittsburgh: on the Allegheny's own side
+        assert 3821269 not in rochester   # ...but upstream of where the Beaver joins the Ohio
+
+
+class TestNearestGagesAboveTheMeeting:
+    def meeting(self):
+        return {"lat": 40.9, "lon": -80.0, "rivers": ["A", "B"], "below": [3, 4]}
+
+    def test_a_gage_below_the_meeting_is_passed_over_for_one_on_the_rivers_own_side(self):
+        by_river = {"A": [gage("near", "Below", lat=40.89, lon=-80.0), gage("far", "Above", lat=41.4, lon=-80.0)],
+                    "B": [gage("b", "B gage", lat=40.95, lon=-80.1)]}
+        comids = {"A": {"near": 3, "far": 99}, "B": {"b": 98}}
+        out = sg.nearest_gages(self.meeting(), by_river, comids)
+        assert [(n["river"], n["site"]) for n in out] == [("A", "far"), ("B", "b")]
+        assert all("below" not in n for n in out)
+
+    def test_when_every_gage_is_below_the_nearest_is_used_and_marked(self):
+        by_river = {"A": [gage("x", "X", lat=40.8, lon=-80.0), gage("y", "Y", lat=40.5, lon=-80.0)], "B": []}
+        out = sg.nearest_gages(self.meeting(), by_river, {"A": {"x": 3, "y": 4}})
+        assert out == [{"river": "A", "site": "x", "name": "X", "km": pytest.approx(11.1, abs=0.1), "below": True}]
+
+    def test_a_gage_with_no_known_flowline_counts_as_above(self):
+        by_river = {"A": [gage("x", "X", lat=40.89, lon=-80.0)], "B": []}
+        out = sg.nearest_gages(self.meeting(), by_river, {"A": {"x": None}})
+        assert out[0]["site"] == "x" and "below" not in out[0]
+
+    def test_without_flowlines_every_gage_counts_as_above(self):
+        by_river = {"A": [gage("x", "X", lat=40.89, lon=-80.0)], "B": []}
+        assert "below" not in sg.nearest_gages(self.meeting(), by_river)[0]
+
+
+class TestFetchDrainageAreas:
+    def test_one_request_gives_every_sites_area(self, route):
+        calls = route({sg.MONITORING: monitoring(("01577505", "SUSQUEHANNA", "Pennsylvania", 27000.0),
+                                                 ("01553500", "WEST BRANCH", "Pennsylvania", 6847.0))})
+        assert sg.fetch_drainage_areas(["01577505", "01553500"]) == {"01577505": 27000.0, "01553500": 6847.0}
+        assert len(calls) == 1
+        assert calls[0][1]["filter"] == "monitoring_location_number IN ('01577505','01553500')"
+        assert calls[0][1]["filter-lang"] == "cql-text"
+
+    def test_sites_with_no_area_are_left_out(self, route):
+        route({sg.MONITORING: monitoring(("1", "A", "S", None), ("2", "B", "S", 0), ("3", "C", "S", 5.0))})
+        assert sg.fetch_drainage_areas(["1", "2", "3"]) == {"3": 5.0}
+
+
+class TestWhichRiverCarriesThrough:
+    """The pass-through rule keeps the bigger of two rivers that have already met."""
+
+    def network(self):
+        # TRIB joins MAIN at M1; further down, OTHER joins at M2. MAIN's walk is the shorter one (it was
+        # anchored far downstream), TRIB's is longer (anchored near its mouth, walked far up).
+        m1, m2 = (-80.0, 41.0), (-80.0, 40.5)
+        shared_below_m1 = [seg(61, m1, m2), seg(62, m2, (-80.0, 40.0))]
+        main = paths(seg(60, (-80.0, 41.5), m1), *shared_below_m1)
+        trib = paths(seg(63, (-79.9, 41.1), m1), seg(64, (-79.8, 41.3), (-79.9, 41.1)),
+                     seg(65, (-79.7, 41.5), (-79.8, 41.3)), *shared_below_m1)
+        other = paths(seg(66, (-80.1, 40.6), m2), shared_below_m1[1])
+        return {"Main": main, "Trib": trib, "Other": other}
+
+    def at_second_confluence(self, found):
+        return next(c["rivers"] for c in found if round(c["lat"], 1) == 40.5)
+
+    def test_the_bigger_basin_is_named_even_when_its_walk_was_shorter(self):
+        net = self.network()
+        assert len(net["Main"]) < len(net["Trib"])  # by path length alone Trib would win
+        found = sg.find_confluences(net, {"Main": 27000.0, "Trib": 6800.0, "Other": 500.0})
+        assert self.at_second_confluence(found) == ["Main", "Other"]
+
+    def test_without_areas_the_longer_walk_is_used(self):
+        assert self.at_second_confluence(sg.find_confluences(self.network())) == ["Trib", "Other"]
+
+    def test_with_an_area_missing_for_one_river_the_walks_are_compared(self):
+        found = sg.find_confluences(self.network(), {"Main": 27000.0, "Trib": None, "Other": 500.0})
+        assert self.at_second_confluence(found) == ["Trib", "Other"]
+
+    def test_areas_do_not_change_where_the_rivers_meet(self):
+        net = self.network()
+        places = lambda found: [(c["lat"], c["lon"]) for c in found]
+        assert places(sg.find_confluences(net)) == places(sg.find_confluences(net, {"Main": 1.0, "Trib": 2.0, "Other": 3.0}))
 
 
 class TestNearestGages:
@@ -192,13 +409,17 @@ class TestNearestGages:
 
 @pytest.fixture
 def stubbed(monkeypatch):
-    """build_gages returns one gage per anchor; fetch_paths gives A and B a shared stretch."""
+    """build_gages returns one gage per anchor and, like the real one, records A's and B's flowlines
+    (a shared stretch below their join) in the `paths` it is given."""
     built = []
+    flowlines = {"A": paths(A_ONLY, *SHARED), "B": paths(B_ONLY, *SHARED)}
 
-    def build_gages(anchor, km, draw=False, as_of=None):
+    def build_gages(anchor, km, draw=False, as_of=None, paths=None, comids=None):
         built.append(anchor)
         if anchor == "EMPTY":
             raise SystemExit("No gages on this river are reporting recent gage height (parameter 00065).")
+        if paths is not None:
+            paths.update(flowlines.get(anchor, {}))
         lat = {"A": 41.0, "B": 40.95, "C": 40.0}.get(anchor, 40.0)
         shared_site = gage("SHARED01", "At the join", lat=40.9, lon=-80.0)
         return ([seg(hash(anchor) % 1000 + 100, (-80, lat), (-80, lat - .01)), A_ONLY],
@@ -206,8 +427,6 @@ def stubbed(monkeypatch):
                 [{"site": f"{anchor}RET", "lat": 40.0, "lon": -80.0}])
 
     monkeypatch.setattr(sg, "build_gages", build_gages)
-    monkeypatch.setattr(sg, "fetch_paths", lambda anchor, km: {
-        "A": paths(A_ONLY, *SHARED), "B": paths(B_ONLY, *SHARED)}.get(anchor, {}))
     return built
 
 
@@ -237,31 +456,72 @@ class TestBuildRivers:
         assert "skipping Dry Creek" in capsys.readouterr().err
         assert len(confluences) == 1 and confluences[0]["rivers"] == ["A", "B"]
 
+    def test_the_flowlines_come_from_the_build_and_only_the_drainage_areas_are_asked_for(self, stubbed, route):
+        calls = route({sg.MONITORING: monitoring(("A", "A AT X", "S", 100.0), ("B", "B AT X", "S", 50.0))})
+        *_, confluences = sg.build_rivers(["A", "B"], ["A", "B"], 322)
+        assert len(confluences) == 1
+        assert [url for url, _ in calls] == [sg.MONITORING]  # no flowline is downloaded a second time
+
+    def test_a_gage_below_the_meeting_is_not_the_nearest_on_its_river(self, monkeypatch):
+        # the gage at the join (on the shared stretch, flowline 3) is the closest to both rivers, but it is
+        # below the meeting, so each river's own gage is named instead; "below" is not left on the result
+        flow = {"A": paths(A_ONLY, *SHARED), "B": paths(B_ONLY, *SHARED)}
+
+        def build_gages(anchor, km, draw=False, as_of=None, paths=None, comids=None):
+            paths.update(flow[anchor])
+            comids.update({"SHARED01": 3, f"{anchor}1": 99})
+            return [], [gage("SHARED01", "At the join", lat=40.9, lon=-80.0),
+                        gage(f"{anchor}1", f"{anchor} up", lat=41.2 if anchor == "A" else 41.1, lon=-80.0)], []
+
+        monkeypatch.setattr(sg, "build_gages", build_gages)
+        monkeypatch.setattr(sg, "fetch_drainage_areas", lambda sites: {})
+        *_, confluences = sg.build_rivers(["A", "B"], ["A", "B"], 322)
+        assert [n["site"] for n in confluences[0]["nearest"]] == ["A1", "B1"]
+        assert "below" not in confluences[0] and all("below" not in n for n in confluences[0]["nearest"])
+
+    def test_every_river_is_given_its_own_comids_to_fill(self, monkeypatch):
+        given = []
+
+        def build_gages(anchor, km, draw=False, as_of=None, paths=None, comids=None):
+            given.append(comids)
+            return [], [gage(f"{anchor}1", anchor)], []
+
+        monkeypatch.setattr(sg, "build_gages", build_gages)
+        sg.build_rivers(["A", "B"], ["A", "B"], 322)
+        assert len(given) == 2 and all(c == {} for c in given) and given[0] is not given[1]
+
+    def test_the_rivers_drainage_areas_reach_the_confluence_rules(self, stubbed, route, monkeypatch):
+        route({sg.MONITORING: monitoring(("A", "A AT X", "S", 100.0), ("B", "B AT X", "S", 50.0))})
+        seen = {}
+        real = sg.find_confluences
+        monkeypatch.setattr(sg, "find_confluences", lambda paths, areas=None, detail=False: seen.update(areas=areas) or real(paths, areas, detail))
+        sg.build_rivers(["A", "B"], ["Alpha", "Beta"], 322)
+        assert seen["areas"] == {"Alpha": 100.0, "Beta": 50.0}
+
+    def test_without_drainage_areas_the_confluences_are_still_found(self, stubbed, route, capsys):
+        route({sg.MONITORING: requests.ConnectionError("usgs down")})
+        *_, confluences = sg.build_rivers(["A", "B"], ["A", "B"], 322)
+        assert len(confluences) == 1
+
+    def test_every_river_is_given_its_own_paths_to_fill(self, monkeypatch):
+        given = []
+
+        def build_gages(anchor, km, draw=False, as_of=None, paths=None, comids=None):
+            given.append(paths)
+            return [], [gage(f"{anchor}1", anchor)], []
+
+        monkeypatch.setattr(sg, "build_gages", build_gages)
+        sg.build_rivers(["A", "B"], ["A", "B"], 322)
+        assert len(given) == 2 and all(p == {} for p in given) and given[0] is not given[1]
+
     def test_all_rivers_empty_exits(self, stubbed):
         with pytest.raises(SystemExit, match="None of these rivers"):
             sg.build_rivers(["EMPTY", "EMPTY"], ["X", "Y"], 322)
 
-    def test_rivers_keep_the_order_given_even_when_their_lookups_finish_out_of_order(self, stubbed, monkeypatch):
-        by_anchor = {"A": paths(A_ONLY, *SHARED), "B": paths(B_ONLY, *SHARED)}
-        started = threading.Event()
-
-        def slow_first(anchor, km):
-            if anchor == "A":
-                started.wait(1)  # A finishes after B has already finished
-                time.sleep(0.05)
-            else:
-                started.set()
-            return by_anchor[anchor]
-
-        monkeypatch.setattr(sg, "fetch_paths", slow_first)
-        *_, confluences = sg.build_rivers(["A", "B"], ["Alpha", "Beta"], 322)
-        assert [c["rivers"] for c in confluences] == [["Alpha", "Beta"]]
-        assert [n["river"] for n in confluences[0]["nearest"]] == ["Alpha", "Beta"]
-
     def test_a_failed_confluence_lookup_still_gives_the_map(self, stubbed, monkeypatch, capsys):
-        def boom(anchor, km):
-            raise requests.ConnectionError("nldi down")
-        monkeypatch.setattr(sg, "fetch_paths", boom)
+        def boom(paths, areas=None, detail=False):
+            raise ValueError("a flowline with no geometry")
+        monkeypatch.setattr(sg, "find_confluences", boom)
         _, gages, _, confluences = sg.build_rivers(["A", "B"], ["A", "B"], 322)
         assert confluences == [] and len(gages) == 3
         assert "Could not look for confluences" in capsys.readouterr().err

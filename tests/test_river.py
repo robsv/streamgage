@@ -145,11 +145,13 @@ class TestResolveAnchor:
         assert "n/a" in capsys.readouterr().out
 
 
-def nldi_site(site, mainstem, lon=-82.0, lat=27.0, name=None):
+def nldi_site(site, mainstem, lon=-82.0, lat=27.0, name=None, comid=None):
     ident = site if site.startswith("USGS-") else f"USGS-{site}"
     props = {"identifier": ident, "name": name or f"GAGE {site}"}
     if mainstem is not None:
         props["mainstem"] = mainstem
+    if comid is not None:
+        props["comid"] = comid
     return {"properties": props, "geometry": {"coordinates": [lon, lat]}}
 
 
@@ -210,6 +212,47 @@ class TestFetchRiver:
                           um_lines=[flowline(1), flowline(2)], dm_lines=[flowline(2), flowline(3)]))
         lines, _ = sg.fetch_river(self.ANCHOR, 322)
         assert sorted(f["properties"]["nhdplus_comid"] for f in lines) == [1, 2, 3]
+
+    def test_without_paths_nothing_is_recorded_and_nothing_extra_is_asked(self, route):
+        calls = route(self.routes([nldi_site("02296750", self.MAIN)], [nldi_site("02298300", self.MAIN)],
+                                  um_lines=[flowline(1)], dm_lines=[flowline(2)]))
+        sg.fetch_river(self.ANCHOR, 322)
+        assert len(calls) == 5  # the anchor's mainstem, then the site walk and the flowline walk each way
+
+    def test_paths_record_every_flowline_by_comid_without_new_requests(self, route):
+        routes = self.routes([nldi_site("02296750", self.MAIN)], [nldi_site("02298300", self.MAIN)],
+                             um_lines=[flowline(1), flowline(2)], dm_lines=[flowline(2), flowline(3)])
+        calls = route(routes)
+        paths = {}
+        sg.fetch_river(self.ANCHOR, 322, paths)
+        assert sorted(paths) == [1, 2, 3]
+        assert paths[2]["properties"]["nhdplus_comid"] == 2
+        assert len(calls) == 5  # the same requests as without paths
+
+    def test_paths_include_the_stretch_past_the_mouth_that_is_not_drawn(self, route):
+        # nothing downstream on this river, so the walk is not drawn, but it is where this river
+        # runs into another, so the paths keep it (at the cost of one request)
+        calls = route(self.routes([nldi_site("02296750", self.MAIN)], [],
+                                  um_lines=[flowline(1)], dm_lines=[flowline(98), flowline(99)]))
+        paths = {}
+        lines, _ = sg.fetch_river(self.ANCHOR, 322, paths)
+        assert [f["properties"]["nhdplus_comid"] for f in lines] == [1]  # still only the river itself
+        assert sorted(paths) == [1, 98, 99]
+        assert any("/DM/flowlines" in url for url, _ in calls)
+
+    def test_comids_record_the_flowline_each_kept_gage_sits_on(self, route):
+        routes = self.routes([nldi_site("02296750", self.MAIN, comid=111), nldi_site("02296751", self.OTHER, comid=222)],
+                             [nldi_site("02298300", self.MAIN, comid=333), nldi_site("02298301", self.MAIN)])
+        route(routes)
+        comids = {}
+        sg.fetch_river(self.ANCHOR, 322, comids=comids)
+        # a gage on another mainstem is not kept, so it is not recorded; one with no comid is None
+        assert comids == {"02296750": 111, "02298300": 333, "02298301": None}
+
+    def test_comids_cost_no_extra_requests(self, route):
+        calls = route(self.routes([nldi_site("02296750", self.MAIN, comid=1)], [nldi_site("02298300", self.MAIN, comid=2)]))
+        sg.fetch_river(self.ANCHOR, 322, comids={})
+        assert len(calls) == 5
 
     def test_a_downstream_walk_with_no_gages_draws_no_line(self, route):
         # nothing downstream on this river: the walk ran into another river, so don't draw it
