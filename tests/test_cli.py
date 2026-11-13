@@ -30,6 +30,7 @@ def river(monkeypatch, route):
     monkeypatch.setattr(sg, "fetch_readings", lambda ids, as_of=None: {  # two days rising 0.05 ft/h
         "02296750": readings(15.5, slope=0.05), "02297345": readings(2.89, slope=0.05)})
     monkeypatch.setattr(sg, "fetch_time_zones", lambda ids: {site: ("EST", True) for site in ids})
+    monkeypatch.setattr(sg, "fetch_flows", lambda ids, as_of=None: {})  # no flow readings unless a test says so
     monkeypatch.setattr(sg, "fetch_nws", lambda site, lat, lon, gauges: (
         {"lid": "ARCF1", "stages": STAGES} if site == "02296750" else None))
     monkeypatch.setattr(sg, "fetch_forecast", lambda lid, stages: {
@@ -82,6 +83,36 @@ class TestBuildGages:
         arcadia = {g["site"]: g for g in sg.build_gages("02298300", 322)[1]}["02296750"]
         assert arcadia["method"] == "nws" and arcadia["category"] == "moderate" and arcadia["forecast"] is None
         assert "NWS forecasts unavailable for 1 gage (Peace River At SR 70 At Arcadia, FL)" in capsys.readouterr().err
+
+    def test_a_gage_with_flow_gets_its_flow_and_flow_percentile(self, river, monkeypatch):
+        now = datetime.now(timezone.utc).timestamp()
+        monkeypatch.setattr(sg, "fetch_flows", lambda ids, as_of=None: {"02296750": [(now - 600, 4150.0)]})
+        asked = []
+
+        def stats(dates, parameter=sg.GAGE_HEIGHT):
+            asked.append((sorted(dates), parameter))
+            return {"02296750": {"month_nu": "11", "day_nu": "5", "count_nu": "95", "min_va": "36",
+                                 "p50_va": "422", "max_va": "2920"}} if parameter == sg.DISCHARGE else {}
+        monkeypatch.setattr(sg, "fetch_daily_stats", stats)
+        by_site = {g["site"]: g for g in sg.build_gages("02298300", 322)[1]}
+        arcadia, platt = by_site["02296750"], by_site["02297345"]
+        assert arcadia["flow"] == 4150.0 and arcadia["flow_longterm"]["status"] == "above"
+        assert platt["flow"] is None and platt["flow_longterm"] is None
+        assert (["02296750"], sg.DISCHARGE) in asked  # flow statistics only for the gage with a flow
+
+    def test_a_flow_reading_far_from_the_stage_reading_is_not_used(self, river, monkeypatch):
+        old = datetime.now(timezone.utc).timestamp() - 3 * 3600
+        monkeypatch.setattr(sg, "fetch_flows", lambda ids, as_of=None: {"02296750": [(old, 4150.0)]})
+        arcadia = {g["site"]: g for g in sg.build_gages("02298300", 322)[1]}["02296750"]
+        assert arcadia["flow"] is None and arcadia["flow_longterm"] is None
+
+    def test_failed_flow_readings_are_said_and_cost_only_the_flow_percentile(self, river, monkeypatch, capsys):
+        def broken(ids, as_of=None):
+            raise sg.requests.ConnectionError("down")
+        monkeypatch.setattr(sg, "fetch_flows", broken)
+        gages = sg.build_gages("02298300", 322)[1]
+        assert len(gages) == 2 and all(g["flow"] is None for g in gages)
+        assert "Flow readings unavailable for 2 gages; they have no flow percentile" in capsys.readouterr().err
 
     def test_gage_counts_read_naturally(self):
         assert sg.gages_count(1) == "1 gage" and sg.gages_count(4) == "4 gages"

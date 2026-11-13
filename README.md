@@ -239,9 +239,9 @@ doesn't, the map says how high the river is relative to that gage's own history.
 | Red | Moderate flood | At or above the moderate flood stage |
 | Purple | Major flood | At or above the major flood stage |
 
-### Diamond colors: three modes
+### Diamond colors: four modes
 
-The "Color diamonds by" control at the top left switches between three views. Circles never change.
+The "Color diamonds by" control at the top left switches between four views. Circles never change.
 
 **Position in 7-day range (default).** Where the current stage sits between the lowest and highest
 reading of the last 7 days. 100% means the gage is at its peak right now, and a drop from 100%
@@ -288,6 +288,24 @@ years. The percentile from the past year alone is still in each diamond's popup 
 is useful as a second opinion, but it is no longer a color mode: during a flood it read 99 or 100 for
 nearly every gage and couldn't tell them apart.
 
+**Flow percentile for this date (all years).** The same comparison for the flow (discharge, in cubic
+feet per second) instead of the stage: where the flow at the moment of the stage reading falls among the
+daily mean flows for this calendar day in every year on record. It uses the same colors as the stage
+percentile, with gray for a gage that has no flow reading or no flow statistics.
+
+It is there because flow is often the better-kept record. Many gages, outside Florida especially,
+have long flow statistics and none for stage: on a map of the Potomac and the Shenandoah, none of the 16
+gages had stage statistics and 12 had flow statistics, and on five Pittsburgh rivers 21 gages had stage
+statistics and a different 34 had flow statistics. And flow can be compared across decades in a way stage
+can't (see [Known limits](#known-limits)). On the Peace River at the November 2026 flood, 11 gages had
+both: 6 fell in the same color band and 4 in the next one, mostly near a band's edge. Peace Creek near
+Bartow was above its stage record but only at the 91st percentile for flow, the kind of drift between
+stage and flow that the flow percentile avoids.
+
+Flow is skewed, so between two of the published percentile points the flow is placed on a log scale
+rather than a straight line; on a straight line, a flood flow would rank too low. The popup of a gage
+with a flow reading gives the flow and its percentile for the date below the stage's.
+
 ### The trend glyph
 
 Every gage with a trend gets a glyph inside its marker, whichever color mode is selected: ▲ rising,
@@ -331,6 +349,8 @@ Click any marker to see:
   high (a gage with no long-term statistics says so). The USGS statistics service gives neither the
   year of the record nor the span of years, so maps made since November 2026 leave those out; the
   sample popup above is from before that.
+- for gages that report flow: the flow in cubic feet per second and how it compares with this date in
+  past years, in the same form
 - for diamonds: the percentile of the past year
 - a link to the gage's USGS page
 
@@ -486,6 +506,7 @@ gages reporting stage in the last 3 days -> trend, range, peak, sparkline
    |  USGS series catalog, field measurements and samples: what the sites that are NOT reporting
    |     have measured -> summary, --retired
    |  USGS daily statistics: this calendar day over every year of record -> percentile for this date
+   |  USGS continuous values and daily statistics, for flow -> flow percentile for this date
    |  NOAA NWPS: is there an NWS gauge at the same spot?
    +--> yes: flood stages + stage forecast  -> circle
    +--> no:  past year of daily values      -> diamond (percentile available), 40 gages per request
@@ -520,6 +541,12 @@ Details worth knowing:
   than one stage series keeps the one with the longest record. A gage with fewer than 10 years of
   record, or no statistics, gets no long-term percentile, and a failed request only costs the gages
   in it.
+- **Flow percentile for this date.** The flow at a gage is the flow reading closest to its stage
+  reading, if one is within an hour; the readings come in one request per 100 gages, covering the last
+  3 days. The flow statistics are read like the stage's, for the gages with a flow, and from the daily
+  mean flow only. Between published points the flow is interpolated on a log scale, except where the
+  lower point or the flow is zero or less (a dry bed, or a tide running upstream), where it is a
+  straight line. Each failed request is said on stderr and costs only the flow percentile.
 - **Yearly percentile.** It is computed against the daily mean stage. Some USGS gages publish only a
   daily maximum and minimum for stage; for those, the midpoint of each day's maximum and minimum
   stands in for the mean. The year of daily values is read for all of a river's diamonds at once, once
@@ -549,6 +576,8 @@ Details worth knowing:
   | NWS gauge records unavailable for N gages | Those gages are drawn as diamonds (they are named) |
   | NWS forecasts unavailable for N gages | Those gages have no forecast ring or crest (they are named) |
   | Statistics for this date unavailable for N gages | Those gages have no percentile for this date |
+  | Flow readings unavailable for N gages | Those gages have no flow percentile |
+  | Flow statistics for this date unavailable for N gages | Those gages have no flow percentile |
   | Past-year daily values unavailable for N gages | Those diamonds have no past-year percentile |
   | Gage time zones unavailable | Times are in UTC, so a late-evening reading can use the next day's statistics |
   | Sensor details unavailable for N gages | The newest stage series is used, which may be a backup sensor |
@@ -713,7 +742,13 @@ cause is that the Leaflet script from unpkg is blocked or unreachable.
   statement than at a gage with 90 years, so the popup always gives the number of years. A gage with
   under 10 years gets no long-term percentile at all.
 - **Stage may not be comparable across decades.** Datums change and channels move, so a 1932 stage
-  and a 2026 stage at the same gage are not always measuring the same thing. Discharge is steadier.
+  and a 2026 stage at the same gage are not always measuring the same thing. Discharge is steadier,
+  which is what the flow percentile is for.
+- **Flow has limits of its own.** USGS computes flow from stage with a rating curve. In a big flood it
+  extends that curve past the highest flow it has measured, and it revises those flows the most
+  afterward, so a flood's flow percentile is provisional twice over. A gage below a dam reports the
+  flow the dam releases, and a tidal gage can report flow running upstream; their percentiles compare
+  like with like, but not with an undisturbed river.
 - **A current reading against daily means.** The current stage is one instant, compared with
   distributions of daily mean stage. Near a crest the instant reads a little high; for a flood like
   the sample's, far above the record, that makes no difference, but a small excursion near a

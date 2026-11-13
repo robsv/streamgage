@@ -71,7 +71,8 @@ def test_the_marker_uses_the_shared_glyph_builder():
 
 def test_the_diamond_modes_and_trend_glyphs_are_in_the_page(make_page):
     page = make_page([gage()])
-    for label in ("Position in 7-day range", "Trend (last 6 h)", "Percentile for this date (all years)"):
+    for label in ("Position in 7-day range", "Trend (last 6 h)", "Percentile for this date (all years)",
+                  "Flow percentile for this date (all years)"):
         assert label in page
     assert page.count('name="mode"') == 1  # the radio group is built from MODES in JavaScript
 

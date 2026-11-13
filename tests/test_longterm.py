@@ -2,6 +2,7 @@
 
 import copy
 import json
+import math
 from datetime import datetime, timedelta
 
 import pytest
@@ -162,15 +163,45 @@ class TestReadingDay:
 FIXTURE_SITES = ["02296750", "02294898", "02294705", "02295440"]
 
 
-def series(site, years, value=1.0, when="11-05", of="00003"):
+def series(site, years, value=1.0, when="11-05", of="00003", parameter="00065"):
     """One site's statistics for a day: the minimum, maximum and percentiles of a record of `years`,
     computed from one kind of daily value (`of`: 00003 the mean, 00001 the maximum, 00002 the minimum)."""
     point = {"time_of_year": when, "sample_count": years}
     return {"type": "Feature", "properties": {"monitoring_location_id": f"USGS-{site}", "data": [{
-        "parameter_code": "00065", "parent_statistic_id": of, "values": [
+        "parameter_code": parameter, "parent_statistic_id": of, "values": [
             point | {"computation": "minimum", "value": str(value - 1)},
             point | {"computation": "maximum", "value": str(value + 1)},
             point | {"computation": "percentile", "percentiles": ["50"], "values": [str(value)]}]}]}}
+
+
+FLOWS = json.loads((FIXTURES / "flow_statistics.json").read_text())  # Arcadia's flow, Nov 5
+ARCADIA_FLOW = sg.stat_row(FLOWS["features"][0]["properties"]["data"][0]["values"], 11, 5)  # 36 .. 2920 ft3/s
+
+
+class TestFlowPercentile:
+    @pytest.mark.parametrize("flow, on_a_log_scale, on_a_line", [
+        (2400.0, 97.7, 97.4),   # between the 95th (1904) and the record (2920)
+        (600.0, 64.9, 63.1),    # between the 50th (422) and the 75th (761)
+        (422.0, 50.0, 50.0),    # exactly a published point: the same either way
+    ])
+    def test_flow_is_placed_on_a_log_scale(self, flow, on_a_log_scale, on_a_line):
+        assert sg.long_term(flow, ARCADIA_FLOW, log=True)["pct"] == pytest.approx(on_a_log_scale, abs=0.05)
+        assert sg.long_term(flow, ARCADIA_FLOW)["pct"] == pytest.approx(on_a_line, abs=0.05)
+
+    def test_a_flood_flow_is_above_the_record(self):
+        result = sg.long_term(30000.0, ARCADIA_FLOW, log=True)
+        assert (result["status"], result["pct"], result["high"]) == ("above", 100.0, 2920.0)
+
+    def test_zero_or_negative_flow_falls_back_to_a_straight_line(self):
+        # a tidal reach: the record runs from a tide flowing upstream to a flood
+        row = stat_row(min_va="-50", p50_va="10", max_va="100")
+        assert sg.long_term(0.0, row, log=True)["pct"] == pytest.approx(50 * 50 / 60, abs=0.05)
+        assert sg.long_term(55.0, row, log=True)["pct"] == pytest.approx(50 + 50 * math.log(5.5) / math.log(10), abs=0.05)
+
+    def test_the_percentile_never_goes_down_as_the_flow_goes_up(self):
+        sweep = [36 * (2920 / 36) ** (i / 400) for i in range(401)]
+        pcts = [sg.long_term(v, ARCADIA_FLOW, log=True)["pct"] for v in sweep]
+        assert pcts == sorted(pcts) and pcts[0] == 0.0 and pcts[-1] == 100.0
 
 
 class TestStatRow:
@@ -251,6 +282,18 @@ class TestFetchDailyStats:
         route({sg.STATISTICS: {"features": [both]}})
         row = sg.fetch_daily_stats({"02299230": (11, 5)})["02299230"]
         assert (row["count_nu"], row["p50_va"]) == ("9", "5.0")
+
+    def test_flow_statistics_are_asked_for_and_said_as_flow(self, route, capsys):
+        calls = route({sg.STATISTICS: {"features": [series("02296750", 95, value=422.0, parameter="00060")]}})
+        row = sg.fetch_daily_stats({"02296750": (11, 5)}, sg.DISCHARGE)["02296750"]
+        assert calls[0][1]["parameter_code"] == "00060" and row["p50_va"] == "422.0"
+        route({sg.STATISTICS: requests.ConnectionError("down")})
+        sg.fetch_daily_stats({"02296750": (11, 5)}, sg.DISCHARGE)
+        assert "Flow statistics for this date unavailable for 1 gage; they have no flow percentile" in capsys.readouterr().err
+
+    def test_stage_statistics_are_not_taken_for_flow(self, route):
+        route({sg.STATISTICS: {"features": [series("02296750", 95, parameter="00065")]}})
+        assert sg.fetch_daily_stats({"02296750": (11, 5)}, sg.DISCHARGE) == {}
 
     def test_follows_the_next_page(self, route):
         pages = {None: {"features": [series("00000001", 20)], "next": "abc"},
@@ -350,6 +393,7 @@ class TestBuildGagesWithStatistics:
             "02294898": [(at("2026-11-05T23:45:00-05:00"), 74.48)],   # still Nov 5 on its own clock
             "02299999": [(at("2026-11-05T12:00:00-05:00"), 3.0)]})
         monkeypatch.setattr(sg, "fetch_time_zones", lambda ids: {site: ("EST", True) for site in ids})
+        monkeypatch.setattr(sg, "fetch_flows", lambda ids, as_of=None: {})  # no flow readings unless a test says so
         monkeypatch.setattr(sg, "STALE_AFTER", timedelta(days=36500))  # count these old readings as current
         monkeypatch.setattr(sg, "fetch_histories", lambda ids, as_of=None: {})
         monkeypatch.setattr(sg, "fetch_catalog", lambda ids: {})
