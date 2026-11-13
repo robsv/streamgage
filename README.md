@@ -514,7 +514,7 @@ Details worth knowing:
 
 | Service | Used for | URL |
 |---|---|---|
-| USGS monitoring-locations (OGC API) | Name search for gages and drainage areas | `api.waterdata.usgs.gov/ogcapi/v0` |
+| USGS monitoring-locations (OGC API) | Name search for gages and drainage areas | `api.waterdata.usgs.gov/ogcapi/v1` |
 | USGS NLDI (Network Linked Data Index) | River flowlines and gages along a river | `api.water.usgs.gov/nldi` |
 | USGS NWIS Instantaneous Values | Latest gage height (parameter `00065`) and the last 7 days | `waterservices.usgs.gov/nwis/iv` |
 | USGS NWIS Daily Values | Past year of daily gage height (mean, or max/min midpoint) | `waterservices.usgs.gov/nwis/dv` |

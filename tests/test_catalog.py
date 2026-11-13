@@ -74,7 +74,7 @@ class TestClassifySite:
 
     def test_recent_discharge_without_stage_is_discharge_only(self, catalog_rows):
         # Arcadia has live discharge; the caller only asks about sites not reporting stage
-        assert sg.classify_site(catalog_rows["02296750"], datetime.now(timezone.utc))[0] == (
+        assert sg.classify_site(catalog_rows["02296750"], NOW)[0] == (
             "discharge_only")
 
     def test_discharge_that_stopped_is_not_discharge_only(self):

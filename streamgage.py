@@ -61,7 +61,7 @@ PARAM_NAMES = {GAGE_HEIGHT: "stage", "00060": "discharge", "00010": "water tempe
 CATEGORY_LABELS = (("discharge_only", "discharge only"), ("offline", "offline"), ("retired", "retired"),
                    ("field_visits", "field visits only"), ("water_quality", "water quality only"),
                    ("other", "other data only"), ("no_data", "no data"))
-MONITORING = "https://api.waterdata.usgs.gov/ogcapi/v0/collections/monitoring-locations/items"
+MONITORING = "https://api.waterdata.usgs.gov/ogcapi/v1/collections/monitoring-locations/items"
 NO_DATA = -999  # NWIS/NWPS report missing values as -999, -9999 or -999999
 MAX_SITES_PER_REQUEST = 100  # NWIS limit
 STALE_AFTER = timedelta(days=3)  # ignore gages whose latest stage reading is older than this
