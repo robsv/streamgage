@@ -364,8 +364,8 @@ What a past map cannot have:
 - **Gages that no longer exist, or that did not exist yet.** A gage that reported then but is retired
   now appears; one installed since does not.
 
-The USGS keeps instantaneous readings for months (a request for five months back worked), so recent
-storms are easy to revisit. For a moment far enough back that no gage has readings, the tool says that
+The USGS serves gage readings back to October 2007 (a request for a week in July 2008 worked), so
+past storms are easy to revisit. For a moment far enough back that no gage has readings, the tool says that
 no gage was reporting stage. To find a moment worth showing, look at a gage's readings on its USGS page,
 or run the tool at a few times and compare. For an example, see
 [Arcadia, November 2026: a storm in six frames](docs/arcadia-nov-2026.md), which uses six moments of
@@ -456,10 +456,10 @@ anchor gage
    |  USGS NLDI: walk the river upstream and downstream
    v
 river line + gages on the same mainstem
-   |  USGS NWIS instantaneous values: latest gage height (00065), in batches of 100
+   |  USGS continuous values: 7 days of gage height (00065), 100 sites per request
    v
-gages reporting stage in the last 3 days
-   |  USGS NWIS instantaneous values: 7 days per gage -> trend, range, peak, sparkline
+gages reporting stage in the last 3 days -> trend, range, peak, sparkline
+   |  USGS monitoring locations: each gage's time zone -> the reading's own clock
    |  USGS site catalog: what the sites that are NOT reporting have measured -> summary, --retired
    |  USGS daily statistics: this calendar day over every year of record -> percentile for this date
    |  NOAA NWPS: is there an NWS gauge at the same spot?
@@ -501,10 +501,20 @@ Details worth knowing:
 - **Forecast crest.** The crest is the highest point in the remaining forecast (from 6 hours ago
   onward), so a peak that has already passed is not reported as the crest. Forecasts are used only
   when the NWS reports them in feet, because the flood thresholds are in feet.
+- **Readings in batches.** One request brings back the last 7 days of readings for up to 100 sites,
+  and a river's batches run in parallel: one request, about 80 KB, for the Peace's 35 gages. Most sites
+  on a river are not stream gages and have no readings, so they cost nothing in the response. The current
+  stage is the newest of those readings, so there is no separate request for it. The response doesn't
+  say when it has left rows out, so a batch that fills a whole page (50,000 rows) is split in two and
+  asked again. If a batch fails, the run stops, as there is no map without readings.
+- **Time zones.** The API gives every reading in UTC. Each gage's USGS record names its time zone and
+  whether it keeps daylight saving time, and the reading is put on that clock with the US rules in
+  force since 2007. If that request fails, the times are shown in UTC, and a reading in the last hours
+  of the day can then be compared with the next day's statistics.
 - **Requests run in parallel** (8 workers) for the per-gage lookups. If one of those requests fails,
-  that gage loses the affected field (trend, percentile or NWS data) instead of stopping the run.
-- **A past moment (`--as-of`).** Every USGS request asks for a window ending at that moment (`startDT`
-  and `endDT`) instead of "the latest" or "the last N days", and "recent" and "stale" are judged against
+  that gage loses the affected field (percentile or NWS data) instead of stopping the run.
+- **A past moment (`--as-of`).** Every USGS request asks for a window ending at that moment instead of
+  "the latest" or "the last N days", and "recent" and "stale" are judged against
   that moment instead of the clock. The NWS forecast is skipped for a past time, and the year of daily
   values for the yearly percentile ends on that date.
 - **Escaping.** Names and titles are escaped before they go into the page, so a gage name or title
@@ -514,9 +524,9 @@ Details worth knowing:
 
 | Service | Used for | URL |
 |---|---|---|
-| USGS monitoring-locations (OGC API) | Name search for gages and drainage areas | `api.waterdata.usgs.gov/ogcapi/v1` |
+| USGS monitoring-locations (OGC API) | Name search for gages, drainage areas and time zones | `api.waterdata.usgs.gov/ogcapi/v1` |
 | USGS NLDI (Network Linked Data Index) | River flowlines and gages along a river | `api.water.usgs.gov/nldi` |
-| USGS NWIS Instantaneous Values | Latest gage height (parameter `00065`) and the last 7 days | `waterservices.usgs.gov/nwis/iv` |
+| USGS continuous values (OGC API) | The last 7 days of gage height (parameter `00065`) | `api.waterdata.usgs.gov/ogcapi/v1` |
 | USGS NWIS Daily Values | Past year of daily gage height (mean, or max/min midpoint) | `waterservices.usgs.gov/nwis/dv` |
 | USGS NWIS Statistics Service | Daily statistics over every year of record: percentiles, minimum, maximum | `waterservices.usgs.gov/nwis/stat` |
 | USGS NWIS Site Service | What each site that is not reporting has measured, and when | `waterservices.usgs.gov/nwis/site` |
@@ -571,7 +581,7 @@ the license.
   Leaflet and the tiles. The `lint` environment is separate, so ruff is not installed for normal runs.
 - **Tests** never touch the network. `tests/fixtures` holds real responses, trimmed to a few days:
   daily values for a site with a daily mean, one with only a daily max and min, and one with all
-  three; two days of instantaneous values; an NWS gauge record; the site catalog for five Peace River
+  three; two days of readings for two gages; the time zones of three gages; an NWS gauge record; the site catalog for five Peace River
   sites (retired, field-visit-only, water-quality-only, and live); and daily statistics for four gages
   (95, 53, 18 and 10 years of record, two with blank percentile columns). Everything else a test needs
   is built in the test. A router fixture (`route` in `tests/conftest.py`) replaces `get_json`, and any

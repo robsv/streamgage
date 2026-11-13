@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import pytest
 
 import streamgage as sg
-from tests.conftest import gage
+from tests.conftest import gage, readings
 
 STAGES = {"action": 9, "minor": 11, "moderate": 14, "major": 16}
 
@@ -17,14 +17,8 @@ def http_error(status):
     return sg.requests.HTTPError(f"{status} error", response=type("Resp", (), {"status_code": status})())
 
 
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
-
-
-def readings():
-    """Two days of 15-minute readings ending now, rising 0.05 ft/h."""
-    end = datetime.now(timezone.utc).timestamp()
-    return [(end - (192 - i) * 900, 2 + 0.05 * i / 4) for i in range(193)]
+def now():
+    return datetime.now(timezone.utc).timestamp()
 
 
 @pytest.fixture
@@ -33,9 +27,9 @@ def river(monkeypatch, route):
     sites = {"02296750": ("PEACE RIVER AT SR 70 AT ARCADIA, FL", 27.22, -81.88),
              "02297345": ("PEACE RIVER AT PLATT FL", 27.09, -82.0)}
     monkeypatch.setattr(sg, "fetch_river", lambda anchor, km: ([{"line": 1}], sites))
-    monkeypatch.setattr(sg, "fetch_current",
-                        lambda ids, as_of=None: {"02296750": (15.5, now_iso()), "02297345": (2.89, now_iso())})
-    monkeypatch.setattr(sg, "fetch_recent", lambda site, as_of=None: readings())
+    monkeypatch.setattr(sg, "fetch_readings", lambda ids, as_of=None: {  # two days rising 0.05 ft/h
+        "02296750": readings(15.5, slope=0.05), "02297345": readings(2.89, slope=0.05)})
+    monkeypatch.setattr(sg, "fetch_time_zones", lambda ids: {site: ("EST", True) for site in ids})
     monkeypatch.setattr(sg, "fetch_nws", lambda site, lat, lon, gauges: (
         {"lid": "ARCF1", "stages": STAGES} if site == "02296750" else None))
     monkeypatch.setattr(sg, "fetch_forecast", lambda lid, stages: {
@@ -119,18 +113,20 @@ class TestBuildGages:
         assert not sg.is_refusal(error)
 
     def test_gages_not_reporting_are_left_out(self, river, monkeypatch):
-        monkeypatch.setattr(sg, "fetch_current", lambda ids, as_of=None: {"02297345": (2.89, now_iso())})
+        monkeypatch.setattr(sg, "fetch_readings", lambda ids, as_of=None: {"02297345": readings(2.89)})
         gages = sg.build_gages("02298300", 322)[1]
         assert [g["site"] for g in gages] == ["02297345"]
 
     def test_no_reporting_gages_exits(self, river, monkeypatch):
-        monkeypatch.setattr(sg, "fetch_current", lambda ids, as_of=None: {})
+        monkeypatch.setattr(sg, "fetch_readings", lambda ids, as_of=None: {})
         with pytest.raises(SystemExit) as exc:
             sg.build_gages("02298300", 322)
         assert "No gages on this river are reporting recent gage height" in str(exc.value)
 
     def test_a_gage_with_no_recent_readings_keeps_its_other_data(self, river, monkeypatch):
-        monkeypatch.setattr(sg, "fetch_recent", lambda site, as_of=None: [])
+        # one fresh reading each: enough to be on the map, too few for a trend or a range
+        monkeypatch.setattr(sg, "fetch_readings", lambda ids, as_of=None: {
+            "02296750": [(now(), 15.5)], "02297345": [(now(), 2.89)]})
         gages = sg.build_gages("02298300", 322)[1]
         assert len(gages) == 2
         assert all(g["recent"] is None for g in gages)

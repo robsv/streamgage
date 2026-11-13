@@ -194,9 +194,10 @@ SITES = {"A0000001": ("RIVER AT NORTH FL", 27.5, -81.8), "B0000002": ("RIVER AT 
 def river(monkeypatch):
     """Two reporting gages and four that are not: retired, offline, field visits, no data."""
     monkeypatch.setattr(sg, "fetch_river", lambda anchor, km: ([], SITES))
-    when = datetime.now(timezone.utc).isoformat()
-    monkeypatch.setattr(sg, "fetch_current", lambda ids, as_of=None: {"A0000001": (2.0, when), "B0000002": (3.0, when)})
-    monkeypatch.setattr(sg, "fetch_recent", lambda site, as_of=None: [])
+    when = datetime.now(timezone.utc).timestamp()
+    monkeypatch.setattr(sg, "fetch_readings", lambda ids, as_of=None: {"A0000001": [(when, 2.0)],
+                                                                       "B0000002": [(when, 3.0)]})
+    monkeypatch.setattr(sg, "fetch_time_zones", lambda ids: {})
     monkeypatch.setattr(sg, "fetch_history", lambda site, as_of=None: [])
     monkeypatch.setattr(sg, "fetch_nws", lambda *a: None)
     monkeypatch.setattr(sg, "fetch_daily_stats", lambda dates: {})

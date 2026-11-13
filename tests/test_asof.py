@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import streamgage as sg
-from tests.conftest import gage
+from tests.conftest import continuous_csv, gage, readings
 
 EST = timezone(timedelta(hours=-5))
 MOMENT = datetime(2026, 11, 3, 12, 0, tzinfo=EST)  # Tuesday noon, Eastern Standard Time
@@ -66,65 +66,22 @@ class TestDescribeMoment:
         assert sg.describe_moment(when) == expected
 
 
-def iv_response(*rows):
-    series = [{"sourceInfo": {"siteCode": [{"value": site}]},
-               "values": [{"value": [{"value": v, "dateTime": t} for t, v in readings]}]}
-              for site, readings in rows]
-    return {"value": {"timeSeries": series}}
-
-
-def stamp(dt):
-    return dt.isoformat(timespec="milliseconds")
-
-
 class TestRequestsForAPastMoment:
-    def test_current_readings_ask_for_the_three_days_ending_then(self, route):
-        calls = route({"/iv/": iv_response()})
-        sg.fetch_current(["02296750"], MOMENT)
-        _, params = calls[0]
-        assert params["startDT"] == "2026-10-31T12:00-05:00"
-        assert params["endDT"] == "2026-11-03T12:00-05:00"
-        assert "siteStatus" not in params and "period" not in params
-
-    def test_without_a_moment_it_still_asks_for_active_sites_now(self, route):
-        calls = route({"/iv/": iv_response()})
-        sg.fetch_current(["02296750"])
-        _, params = calls[0]
-        assert params["siteStatus"] == "active"
-        assert "startDT" not in params and "endDT" not in params
+    def test_the_week_of_readings_ends_at_the_moment(self, route):
+        calls = route({sg.CONTINUOUS_ITEMS: continuous_csv()})
+        sg.fetch_readings(["02296750"], MOMENT)
+        assert calls[0][1]["datetime"] == "2026-10-27T12:00-05:00/2026-11-03T12:00-05:00"
 
     def test_a_utc_moment_is_sent_with_its_own_offset(self, route):
-        calls = route({"/iv/": iv_response()})
-        sg.fetch_current(["02296750"], datetime(2026, 11, 3, 17, 0, tzinfo=timezone.utc))
-        assert calls[0][1]["endDT"] == "2026-11-03T17:00+00:00"
+        calls = route({sg.CONTINUOUS_ITEMS: continuous_csv()})
+        sg.fetch_readings(["02296750"], datetime(2026, 11, 3, 17, 0, tzinfo=timezone.utc))
+        assert calls[0][1]["datetime"].endswith("/2026-11-03T17:00+00:00")
 
-    def test_recent_staleness_is_judged_against_the_moment_not_today(self, route):
-        two_days_before = stamp(MOMENT - timedelta(days=2))
-        route({"/iv/": iv_response(("02296750", [(two_days_before, "9.5")]))})
+    def test_recent_staleness_is_judged_against_the_moment_not_today(self):
+        two_days_before = (MOMENT - timedelta(days=2)).timestamp()
         # two days old at that moment: fresh then, although it is long past by today's clock
-        assert sg.fetch_current(["02296750"], MOMENT) == {"02296750": (9.5, two_days_before)}
-
-    @pytest.mark.parametrize("age, kept", [
-        (timedelta(days=3), True),                       # exactly three days old at the moment
-        (timedelta(days=3, minutes=1), False),
-        (timedelta(0), True),
-    ])
-    def test_the_three_day_limit_is_measured_from_the_moment(self, route, age, kept):
-        reading = stamp(MOMENT - age)
-        route({"/iv/": iv_response(("02296750", [(reading, "9.5")]))})
-        assert bool(sg.fetch_current(["02296750"], MOMENT)) is kept
-
-    def test_the_week_of_readings_ends_at_the_moment(self, route):
-        calls = route({"/iv/": iv_response(("02296750", []))})
-        sg.fetch_recent("02296750", MOMENT)
-        _, params = calls[0]
-        assert params["startDT"] == "2026-10-27T12:00-05:00" and params["endDT"] == "2026-11-03T12:00-05:00"
-        assert "period" not in params
-
-    def test_the_week_of_readings_is_still_a_period_without_a_moment(self, route):
-        calls = route({"/iv/": iv_response(("02296750", []))})
-        sg.fetch_recent("02296750")
-        assert calls[0][1]["period"] == "P7D" and "startDT" not in calls[0][1]
+        assert sg.latest_readings({"02296750": [(two_days_before, 9.5)]}, MOMENT) == {
+            "02296750": (9.5, two_days_before)}
 
     def test_the_year_of_daily_values_ends_on_the_moments_date(self, route, fixture):
         calls = route({"/dv/": fixture("dv_mean_only.json")})
@@ -139,28 +96,21 @@ class TestRequestsForAPastMoment:
         assert calls[0][1]["period"] == "P365D" and "startDT" not in calls[0][1]
 
 
-def readings_ending_at(moment, hours=48, slope=0.05):
-    end = moment.timestamp()
-    n = hours * 4
-    return [(end - (n - i) * 900, 12.0 + slope * (i * 900 / 3600)) for i in range(n + 1)]
-
-
 @pytest.fixture
 def river(monkeypatch):
     """Two gages as of MOMENT: Arcadia (NWS, with stages) and a diamond; records what it was asked."""
-    asked = {"current": [], "recent": [], "history": [], "forecast": [], "catalog_now": []}
+    asked = {"readings": [], "history": [], "forecast": [], "catalog_now": []}
     sites = {"02296750": ("PEACE RIVER AT SR 70 AT ARCADIA, FL", 27.22, -81.88),
              "02294898": ("PEACE RIVER AT FORT MEADE FL", 27.75, -81.78),
              "02299999": ("PEACE RIVER OLD GAGE FL", 27.0, -82.0)}
     monkeypatch.setattr(sg, "fetch_river", lambda anchor, km: ([], sites))
 
-    def current(ids, as_of=None):
-        asked["current"].append(as_of)
-        stamp_ = stamp(as_of or MOMENT)
-        return {"02296750": (16.0, stamp_), "02294898": (74.5, stamp_)}
-    monkeypatch.setattr(sg, "fetch_current", current)
-    monkeypatch.setattr(sg, "fetch_recent",
-                        lambda site, as_of=None: asked["recent"].append(as_of) or readings_ending_at(MOMENT))
+    def fetch_readings(ids, as_of=None):
+        asked["readings"].append(as_of)
+        end = (as_of or datetime.now(timezone.utc)).timestamp()
+        return {"02296750": readings(16.0, end, slope=0.05), "02294898": readings(74.5, end, slope=0.05)}
+    monkeypatch.setattr(sg, "fetch_readings", fetch_readings)
+    monkeypatch.setattr(sg, "fetch_time_zones", lambda ids: {site: ("EST", True) for site in ids})
     monkeypatch.setattr(sg, "fetch_history",
                         lambda site, as_of=None: asked["history"].append(as_of) or [float(i) for i in range(40)])
     monkeypatch.setattr(sg, "fetch_nws", lambda site, lat, lon, gauges: (
@@ -178,13 +128,12 @@ def river(monkeypatch):
 class TestBuildGagesAsOf:
     def test_the_moment_reaches_every_fetch(self, river):
         sg.build_gages("anchor", 322, as_of=MOMENT)
-        assert river["current"] == [MOMENT]
-        assert set(river["recent"]) == {MOMENT} and len(river["recent"]) == 2
+        assert river["readings"] == [MOMENT]  # one batched request for every gage's readings
         assert river["history"] == [MOMENT]  # only the one diamond needs a year of history
 
     def test_without_a_moment_nothing_is_dated(self, river):
         sg.build_gages("anchor", 322)
-        assert river["current"] == [None] and set(river["recent"]) == {None} and set(river["history"]) == {None}
+        assert river["readings"] == [None] and set(river["history"]) == {None}
 
     def test_there_are_no_forecasts_for_a_past_moment(self, river):
         gages = {g["site"]: g for g in sg.build_gages("anchor", 322, as_of=MOMENT)[1]}
@@ -203,9 +152,16 @@ class TestBuildGagesAsOf:
         assert gages["02296750"]["recent"]["rate"] == pytest.approx(0.05)
         assert gages["02296750"]["recent"]["delta24"] == pytest.approx(0.05 * 24)
 
-    def test_the_same_readings_have_no_trend_when_judged_against_today(self, river):
-        gages = {g["site"]: g for g in sg.build_gages("anchor", 322)[1]}
-        assert gages["02296750"]["recent"]["rate"] is None  # years old by today's clock
+    def test_the_same_readings_are_not_current_when_judged_against_today(self, river, monkeypatch):
+        # years old by today's clock, so no gage counts as reporting
+        monkeypatch.setattr(sg, "fetch_readings", lambda ids, as_of=None: {
+            "02296750": readings(16.0, MOMENT.timestamp(), slope=0.05)})
+        with pytest.raises(SystemExit):
+            sg.build_gages("anchor", 322)
+
+    def test_the_time_is_given_on_the_gages_own_clock(self, river):
+        gages = {g["site"]: g for g in sg.build_gages("anchor", 322, as_of=MOMENT)[1]}
+        assert gages["02296750"]["time"] == "2026-11-03T12:00:00-05:00"
 
     def test_the_retired_test_uses_the_moments_date(self, river):
         # last data 2025-11-04: 364 days before MOMENT, so still just "offline" then. Today it is "retired".
