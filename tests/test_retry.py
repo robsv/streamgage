@@ -90,13 +90,14 @@ class TestApiKey:
             return seen
         return install
 
-    def test_the_key_goes_to_the_water_data_api_in_a_header(self, sent, monkeypatch):
+    @pytest.mark.parametrize("url", [URL, sg.STATISTICS, sg.SAMPLE_SITES])
+    def test_the_key_goes_to_the_water_data_api_in_a_header(self, sent, monkeypatch, url):
         monkeypatch.setenv(sg.API_KEY_VARIABLE, "  abc123  ")
         headers = sent()
-        sg.get_json(self.URL, f="json")
+        sg.get_json(url, f="json")
         assert headers == [{"X-Api-Key": "abc123"}]
 
-    @pytest.mark.parametrize("url", [sg.NWPS, sg.STAT_SERVICE, sg.NLDI])
+    @pytest.mark.parametrize("url", [sg.NWPS, sg.NLDI, "https://waterservices.usgs.gov/nwis/iv/"])
     def test_no_other_service_is_sent_the_key(self, sent, monkeypatch, url):
         monkeypatch.setenv(sg.API_KEY_VARIABLE, "abc123")
         headers = sent()

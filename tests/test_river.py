@@ -357,11 +357,12 @@ class TestFetchReadings:
         sg.fetch_readings(["02296750", "02297345"])
         assert [p["monitoring_location_id"] for url, p in calls if url == sg.TIME_SERIES] == ["USGS-02296750"]
 
-    def test_without_the_series_catalog_the_newest_series_is_kept(self, route):
+    def test_without_the_series_catalog_the_newest_series_is_kept(self, route, capsys):
         route({sg.TIME_SERIES: sg.requests.ConnectionError("down"), sg.CONTINUOUS_ITEMS: continuous_csv(
             ("02296750", [(hours_ago(30), "9.0"), (hours_ago(29), "9.1"), (hours_ago(28), "9.2")], "old"),
             ("02296750", [(hours_ago(2), "4.0"), (hours_ago(1), "4.1")], "new"))})
         assert [v for _, v in sg.fetch_readings(["02296750"])["02296750"]] == [4.0, 4.1]
+        assert "Sensor details unavailable for 1 gage with more than one stage series" in capsys.readouterr().err
 
     def test_sites_go_in_batches(self, route):
         sites = [f"{i:08d}" for i in range(250)]
@@ -429,9 +430,10 @@ class TestFetchTimeZones:
         assert [p["filter"].count("'") // 2 for _, p in calls] == [100, 100, 50]
 
     @pytest.mark.parametrize("response", [sg.requests.ConnectionError("down"), {"no": "features"}])
-    def test_a_failure_gives_no_zones_instead_of_stopping_the_run(self, route, response):
+    def test_a_failure_gives_no_zones_instead_of_stopping_the_run(self, route, response, capsys):
         route({sg.MONITORING: response})
         assert sg.fetch_time_zones(["02296750"]) == {}
+        assert "Gage time zones unavailable; times are given in UTC" in capsys.readouterr().err
 
 
 class TestLocalTime:

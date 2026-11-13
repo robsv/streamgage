@@ -326,9 +326,11 @@ Click any marker to see:
   "Steady, at its 7-day high" for a steady gage whose latest reading is the week's high), the 24-hour
   change, the 7-day range with the current position in it, the 7-day peak and how long ago it
   happened, and a 7-day sparkline
-- for every gage: how the stage compares with this date in past years: its percentile, the years
-  of record, the median and the record for the date, or "above the record" with the previous high
-  (a gage with no long-term statistics says so)
+- for every gage: how the stage compares with this date in past years: its percentile, the number
+  of years of record, the median and the record for the date, or "above the record" with the previous
+  high (a gage with no long-term statistics says so). The USGS statistics service gives neither the
+  year of the record nor the span of years, so maps made since November 2026 leave those out; the
+  sample popup above is from before that.
 - for diamonds: the percentile of the past year
 - a link to the gage's USGS page
 
@@ -508,15 +510,16 @@ Details worth knowing:
   newest reading is more than 3 hours old, so a stale gage is never shown as currently rising or
   falling. The range is the lowest and highest reading in 7 days; a range under 0.1 ft is treated as
   sensor noise and gives no position. The sparkline keeps the last reading of each hour.
-- **Percentile for this date.** For each gage the script reads the USGS statistics row for the
-  calendar day of its own reading (on the gage's own clock, so a reading at 11:30 pm is still that
-  day). The row gives the minimum, the 5th, 10th, 20th, 25th, 50th, 75th, 80th, 90th and 95th
-  percentiles and the maximum across all years, and the script interpolates between those points to
-  place the current stage; blank columns are skipped, and a flat stretch of repeated values takes the
-  middle of its percentile span. The service takes at most 10 sites per request, so a river's gages
-  go in batches that run in parallel (two requests, about 640 KB, for 16 gages). A gage with fewer than
-  10 years of record, or no row, gets no long-term percentile, and a failed request only costs the
-  gages in that batch.
+- **Percentile for this date.** For each gage the script reads the USGS statistics for the calendar
+  day of its own reading (on the gage's own clock, so a reading at 11:30 pm is still that day). They
+  give the minimum, the 5th, 10th, 25th, 50th, 75th, 90th and 95th percentiles and the maximum across
+  all years, and the script interpolates between those points to place the current stage; blank
+  values are skipped, and a flat stretch of repeated values takes the middle of its percentile span.
+  A river's gages go up to 100 to a request, usually one request for the whole river (about 25 KB for
+  40 gages); gages whose readings fall on different days go in separate requests. A gage with more
+  than one stage series keeps the one with the longest record. A gage with fewer than 10 years of
+  record, or no statistics, gets no long-term percentile, and a failed request only costs the gages
+  in it.
 - **Yearly percentile.** It is computed against the daily mean stage. Some USGS gages publish only a
   daily maximum and minimum for stage; for those, the midpoint of each day's maximum and minimum
   stands in for the mean. The year of daily values is read for all of a river's diamonds at once, once
@@ -537,6 +540,22 @@ Details worth knowing:
   of the day can then be compared with the next day's statistics.
 - **Requests run in parallel** (8 workers) for the per-gage lookups. If one of those requests fails,
   that gage loses the affected field (percentile or NWS data) instead of stopping the run.
+- **Nothing is left out silently.** Whenever a failed request changes the map, the terminal says so,
+  with how many gages it affects:
+
+  | Message | What the map does instead |
+  |---|---|
+  | NWS flood stages unavailable | Every gage is colored by percentile, with no flood categories or forecasts |
+  | NWS gauge records unavailable for N gages | Those gages are drawn as diamonds (they are named) |
+  | NWS forecasts unavailable for N gages | Those gages have no forecast ring or crest (they are named) |
+  | Statistics for this date unavailable for N gages | Those gages have no percentile for this date |
+  | Past-year daily values unavailable for N gages | Those diamonds have no past-year percentile |
+  | Gage time zones unavailable | Times are in UTC, so a late-evening reading can use the next day's statistics |
+  | Sensor details unavailable for N gages | The newest stage series is used, which may be a backup sensor |
+  | site details unavailable (in the summary line) | The sites that aren't reporting aren't sorted, and `--retired` draws none |
+  | Drainage areas unavailable | Confluences are named by how far each walk went, which can name the wrong river |
+
+  A run with none of these lines drew everything it could find.
 - **A past moment (`--as-of`).** Every USGS request asks for a window ending at that moment instead of
   "the latest" or "the last N days", and "recent" and "stale" are judged against
   that moment instead of the clock. The NWS forecast is skipped for a past time, and the year of daily
@@ -552,7 +571,7 @@ Details worth knowing:
 | USGS NLDI (Network Linked Data Index) | River flowlines and gages along a river | `api.water.usgs.gov/nldi` |
 | USGS continuous values (OGC API) | The last 7 days of gage height (parameter `00065`) | `api.waterdata.usgs.gov/ogcapi/v1` |
 | USGS daily values (OGC API) | Past year of daily gage height (mean, or max/min midpoint) | `api.waterdata.usgs.gov/ogcapi/v1` |
-| USGS NWIS Statistics Service | Daily statistics over every year of record: percentiles, minimum, maximum | `waterservices.usgs.gov/nwis/stat` |
+| USGS Water Data Statistics | Daily statistics over every year of record: percentiles, minimum, maximum | `api.waterdata.usgs.gov/statistics/v0` |
 | USGS series catalog and field measurements (OGC API) | What each site that is not reporting has measured, and when; a gage's primary sensor | `api.waterdata.usgs.gov/ogcapi/v1` |
 | USGS samples | Which of those sites have water-quality samples | `api.waterdata.usgs.gov/samples-data` |
 | NOAA NWPS (National Water Prediction Service) | NWS flood stages and stage forecasts | `api.water.noaa.gov/nwps/v1` |
@@ -569,9 +588,11 @@ USGS and the thresholds and forecasts from NOAA.
 ## Privacy
 
 Nothing is uploaded and there is no account. The script sends the river name (and `--state`) to the
-USGS monitoring-locations service; USGS site numbers and the walk distance (and, with `--as-of`, the time window) to USGS NLDI and NWIS; and
-the bounding box of the gages it found, plus NWS gauge ids, to NOAA. Every host also sees your IP
-address and the User-Agent `streamgage-map/1.0`.
+USGS monitoring-locations service; USGS site numbers and the walk distance to USGS NLDI; USGS site
+numbers (and, with `--as-of`, the time window and calendar day) to the USGS Water Data API; and the
+bounding box of the gages it found, plus NWS gauge ids, to NOAA. If `WATERDATA_API_KEY` is set, the key
+goes to the USGS Water Data API and to no other host (see [An API key](#an-api-key-optional)). Every
+host also sees your IP address and the User-Agent `streamgage-map/1.0`.
 
 The HTML page you open makes requests of its own: your browser loads Leaflet from unpkg (pinned to
 version 1.9.4 with a Subresource Integrity hash) and map tiles from the basemap you select (Esri by
@@ -610,7 +631,7 @@ the license.
   of four gages with a backup sensor; an NWS gauge record; the series catalog, field measurements and
   samples for five Peace River sites (retired, field-visit-only, water-quality-only, and live); and
   daily statistics for four gages
-  (95, 53, 18 and 10 years of record, two with blank percentile columns). Everything else a test needs
+  (95, 58, 18 and 10 years of record, two with blank percentiles). Everything else a test needs
   is built in the test. A router fixture (`route` in `tests/conftest.py`) replaces `get_json`, and any
   request a test did not expect fails it. The page's JavaScript logic (marker colors, trend bins, the
   cresting rule, number formatting) runs under Node from `tests/page_logic.js`; those tests skip when
@@ -618,10 +639,10 @@ the license.
   response from the service, trim the long arrays, and save it as JSON.
 - Generated maps (`*_gages.html`) are ignored by git.
 - Tunable constants are at the top of the file: `STALE_AFTER` (3 days), `MATCH_RADIUS_KM` (0.5),
-  `KM_PER_MILE`, `MAX_SITES_PER_REQUEST` (100, the NWIS limit), `RECENT_DAYS` (7), `TREND_HOURS` (6),
+  `KM_PER_MILE`, `MAX_SITES_PER_REQUEST` (100), `RECENT_DAYS` (7), `TREND_HOURS` (6),
   `MIN_RECENT_POINTS` (12), `MIN_RECENT_SPAN_HOURS` (24), `TREND_MAX_AGE_HOURS` (3),
-  `MIN_RANGE_FT` (0.1), `MIN_HISTORY_DAYS` (30), `MIN_STAT_YEARS` (10), `MAX_STAT_SITES` (10, the
-  statistics service's limit), `RETIRED_AFTER` (a year, the line between offline and retired) and
+  `MIN_RANGE_FT` (0.1), `MIN_HISTORY_DAYS` (30), `MIN_STAT_YEARS` (10),
+  `RETIRED_AFTER` (a year, the line between offline and retired) and
   `FLOOD_CATEGORIES`. The trend thresholds
   (0.02 and 0.10 ft/h) are in the page's JavaScript, in the `TREND` table.
 - To check how a page renders without a browser window, headless Chrome works:
@@ -683,10 +704,11 @@ cause is that the Leaflet script from unpkg is blocked or unreachable.
 - **The past-year percentile is only a second opinion.** It uses the past 365 days, so after an
   unusually dry or wet year it can mean less than it sounds, and it saturates at 100 in a flood. It is
   in the popup, not a color mode.
-- **Long-term percentiles are interpolated.** USGS publishes only nine percentile points (plus the
-  minimum and maximum) for each calendar day, so a value between them is a straight-line estimate, and
-  about a quarter of the daily rows for these gages have blank columns (mostly the 5th and 95th, on
-  short records).
+- **Long-term percentiles are interpolated.** USGS publishes only seven percentile points (plus the
+  minimum and maximum) for each calendar day, so a value between them is a straight-line estimate,
+  and some gages have blanks (mostly the 5th and 95th, on short records). The legacy service also
+  gave the 20th and 80th, so a stage between the 75th and 90th can read a little differently from
+  before.
 - **Short records.** Some gages have 10 to 18 years of record. "Above the record" there is a weaker
   statement than at a gage with 90 years, so the popup always gives the number of years. A gage with
   under 10 years gets no long-term percentile at all.

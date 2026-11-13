@@ -510,6 +510,7 @@ class TestBuildRivers:
         route({sg.MONITORING: requests.ConnectionError("usgs down")})
         *_, confluences = sg.build_rivers(["A", "B"], ["A", "B"], 322)
         assert len(confluences) == 1
+        assert "Drainage areas unavailable" in capsys.readouterr().err  # the naming may differ, and it says so
 
     def test_every_river_is_given_its_own_paths_to_fill(self, monkeypatch):
         given = []

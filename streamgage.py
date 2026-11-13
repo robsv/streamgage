@@ -4,8 +4,8 @@
 Data sources (all public; no API key needed, though one raises a USGS rate limit):
   * USGS NLDI           - river flowlines and gages along the main stem
   * USGS Water Data API - the last 7 days of gage height (00065) readings, 365 days of daily values,
-                          gage time zones, and what each site that is not reporting has measured
-  * USGS Water Services - daily statistics
+                          daily statistics over every year of record, gage time zones, and what
+                          each site that is not reporting has measured
   * NOAA NWPS           - NWS flood categories (action/minor/moderate/major)
 
 Gages with NWS flood stages are colored by flood category (circles). Gages
@@ -42,16 +42,15 @@ from itertools import combinations
 import requests
 
 NLDI = "https://api.water.usgs.gov/nldi/linked-data/nwissite"
-NWIS = "https://waterservices.usgs.gov/nwis"
-STAT_SERVICE = f"{NWIS}/stat/"  # daily statistics over every year of record
 NWPS = "https://api.water.noaa.gov/nwps/v1/gauges"
 GAGE_HEIGHT = "00065"
-DAILY_MAX, DAILY_MIN, DAILY_MEAN = "00001", "00002", "00003"  # NWIS statistic codes
+DAILY_MAX, DAILY_MIN, DAILY_MEAN = "00001", "00002", "00003"  # USGS statistic codes
 MIN_HISTORY_DAYS = 30  # fewer daily values than this and there is no yearly percentile
-MAX_STAT_SITES = 10  # the statistics service rejects requests for more sites than this
 MIN_STAT_YEARS = 10  # fewer years of record than this and there is no long-term percentile
+MAX_STAT_PAGES = 20  # pages to follow in one statistics request, so a looping "next" cannot hang a run
 # the statistics columns that give the distribution of one calendar day across all years of
-# record, and the percentile each one is (the minimum is the 0th and the maximum the 100th)
+# record, and the percentile each one is (the minimum is the 0th and the maximum the 100th). They are
+# named as the legacy USGS statistics service named them; the current one has no 20th or 80th.
 STAT_COLUMNS = (("min_va", 0), ("p05_va", 5), ("p10_va", 10), ("p20_va", 20), ("p25_va", 25),
                 ("p50_va", 50), ("p75_va", 75), ("p80_va", 80), ("p90_va", 90), ("p95_va", 95),
                 ("max_va", 100))
@@ -74,13 +73,14 @@ TIME_SERIES = f"{OGCAPI}/time-series-metadata/items"  # what each series is, suc
 DAILY_ITEMS = f"{OGCAPI}/daily/items"  # one value per day: the mean, maximum and minimum
 FIELD_MEASUREMENTS = f"{OGCAPI}/field-measurements/items"  # what staff measured on visits to a site
 SAMPLE_SITES = f"{WATERDATA}samples-data/monitoring-locations"  # the sites with water-quality samples
+STATISTICS = f"{WATERDATA}statistics/v0/observationNormals"  # each calendar day over every year of record
 READINGS_SITES_PER_REQUEST = 100  # most sites on a river have no readings; a batch that overflows a page is split
 HISTORY_SITES_PER_REQUEST = 40  # a year of daily mean, maximum and minimum for this many sites fits in a page
 PAGE_ROWS = 50000  # the most rows the API returns at once; a full page may have been cut short
 # hours from UTC of the standard time in each time zone USGS names for a gage
 ZONE_OFFSETS = {"AST": -4, "EST": -5, "CST": -6, "MST": -7, "PST": -8, "AKST": -9, "HST": -10}
-NO_DATA = -999  # NWIS/NWPS report missing values as -999, -9999 or -999999
-MAX_SITES_PER_REQUEST = 100  # NWIS limit
+NO_DATA = -999  # USGS and NWS report missing values as -999, -9999 or -999999
+MAX_SITES_PER_REQUEST = 100  # sites per request where nothing else sets the batch
 STALE_AFTER = timedelta(days=3)  # ignore gages whose latest stage reading is older than this
 FLOOD_CATEGORIES = ("action", "minor", "moderate", "major")  # the ones the page knows how to color
 MATCH_RADIUS_KM = 0.5  # max distance between a USGS site and its NWS gauge
@@ -371,7 +371,7 @@ def find_confluences(paths, areas=None, detail=False):
 
 
 def usable(value):
-    """Parse an NWIS value; None for blanks and the -999999 style no-data sentinels."""
+    """Parse a USGS or NWS value; None for blanks, "nan", and the -999999 style no-data sentinels."""
     try:
         v = float(value)
     except (TypeError, ValueError):
@@ -444,7 +444,8 @@ def fetch_readings(site_ids, as_of=None):
 
 def fetch_series_kinds(site_ids):
     """{series id: (primary, description)} for the gage-height series at these sites, from the USGS
-    series catalog. A failed request gives {}, and series_rank then goes by the readings alone."""
+    series catalog. A failed request gives {}, said on stderr, and series_rank then goes by the
+    readings alone."""
     kinds = {}
     try:
         for i in range(0, len(site_ids), MAX_SITES_PER_REQUEST):
@@ -455,6 +456,8 @@ def fetch_series_kinds(site_ids):
                 p = f["properties"]
                 kinds[p["id"]] = (p.get("primary") == "Primary", p.get("web_description"))
     except (requests.RequestException, KeyError, TypeError, ValueError):
+        say_missing(f"Sensor details unavailable for {gages_count(len(site_ids))} with more than one stage "
+                    "series; the newest series is used, which may be a backup sensor.")
         return {}
     return kinds
 
@@ -475,7 +478,7 @@ def latest_readings(readings, as_of=None):
 
 def fetch_time_zones(site_ids):
     """{site: (zone abbreviation, uses daylight saving time)} from the USGS location records, such as
-    ("EST", True). A failed request gives {}, and those gages' times are then given in UTC."""
+    ("EST", True). A failed request gives {}, said on stderr, and the times are then given in UTC."""
     zones = {}
     try:
         for i in range(0, len(site_ids), MAX_SITES_PER_REQUEST):
@@ -489,6 +492,8 @@ def fetch_time_zones(site_ids):
                 zones[p["monitoring_location_number"]] = (p.get("time_zone_abbreviation"),
                                                           p.get("uses_daylight_savings") == "Y")
     except (requests.RequestException, KeyError, TypeError, ValueError):
+        say_missing("Gage time zones unavailable; times are given in UTC, so a reading late in the evening can "
+                    "be compared with the next day's statistics for this date.")
         return {}  # the times are still right, only shown in UTC
     return zones
 
@@ -552,15 +557,6 @@ def describe_moment(when):
 
 def get_text(url, **params):
     return get(url, params).text
-
-
-def parse_rdb(text):
-    """Rows of a USGS RDB (tab-separated) response as dicts. Comment lines and the column-type line
-    that follows the header are skipped."""
-    rows = [line.split("\t") for line in text.splitlines() if line and not line.startswith("#")]
-    if len(rows) < 2:
-        return []
-    return [dict(zip(rows[0], row)) for row in rows[2:]]
 
 
 def fetch_catalog(site_ids):
@@ -647,13 +643,23 @@ def percentile_label(g):
     return f"p{g['pct']:.0f}*" if g.get("pct") is not None else "n/a"
 
 
+def gages_count(n):
+    return f"{n} gage" + ("" if n == 1 else "s")
+
+
+def say_missing(text):
+    """Say on stderr that part of the map is missing or drawn another way because a request failed, so
+    that no fallback changes the map silently."""
+    print(text, file=sys.stderr)
+
+
 def describe_sites(n_sites, n_reporting, counts, retired_count, draw_retired):
     """The one-line summary printed to stderr: where every site on the river went."""
     msg = f"{n_sites} sites on river: {n_reporting} reporting stage"
     if n_sites > n_reporting:
         msg += f"; {n_sites - n_reporting} not"
         if counts is None:
-            msg += " (site details unavailable)"
+            msg += " (site details unavailable" + ("; retired gages cannot be drawn this time)" if draw_retired else ")")
         else:
             parts = [f"{counts[key]} {label}" for key, label in CATEGORY_LABELS if counts.get(key)]
             msg += f" ({', '.join(parts)})" if parts else ""
@@ -670,8 +676,8 @@ def fetch_histories(site_ids, as_of=None):
 
     Uses the daily mean. Some sites publish only a daily maximum and minimum for stage; for those the
     midpoint of each day's maximum and minimum stands in for the mean. Sites go
-    HISTORY_SITES_PER_REQUEST to a request (see fetch_csv). A failed request costs those sites their
-    past-year percentile, not the run.
+    HISTORY_SITES_PER_REQUEST to a request (see fetch_csv). A failed request costs the sites their
+    past-year percentile, not the run, and is said on stderr.
     """
     end = (as_of or datetime.now(timezone.utc)).date()
     try:
@@ -679,7 +685,10 @@ def fetch_histories(site_ids, as_of=None):
                          parameter_code=GAGE_HEIGHT, statistic_id=f"{DAILY_MAX},{DAILY_MIN},{DAILY_MEAN}",
                          datetime=f"{(end - timedelta(days=365)).isoformat()}/{end.isoformat()}")
     except (requests.RequestException, KeyError, ValueError):
-        return {}  # the past-year percentile is a second opinion; the map does without it
+        # the past-year percentile is a second opinion: the map does without it, but says so
+        say_missing(f"Past-year daily values unavailable for {gages_count(len(site_ids))}; their past-year "
+                    "percentile is missing. Run it again later for those.")
+        return {}
     by_site = {}  # site -> statistic -> {date: value}
     for row in rows:
         value = usable(row.get("value"))
@@ -754,30 +763,82 @@ def reading_day(when):
 
 
 def fetch_daily_stats(dates):
-    """The statistics row for each site's own calendar day: {site: row}.
+    """The statistics row for each site's own calendar day: {site: row}, shaped like a row of the legacy
+    USGS statistics service (see stat_row) for long_term.
 
-    `dates` maps site -> (month, day). The service takes at most MAX_STAT_SITES sites per request, so
-    sites go in batches that run in parallel. A batch that fails is skipped, so its sites simply have
-    no long-term statistics; sites the service has no statistics for are absent from the result.
+    `dates` maps site -> (month, day). Sites on the same day go MAX_SITES_PER_REQUEST to a request,
+    and the requests run in parallel. The service computes statistics from each kind of daily value
+    (mean, maximum, minimum, tidal high and low); only those of the daily mean are used, as the legacy
+    service did, so a gage that publishes only a daily maximum and minimum gets none. A site with more
+    than one series of daily means keeps the one with the longest record. A request that fails is
+    skipped and its sites have no long-term statistics, which is said on stderr; sites the service has
+    no statistics for are absent from the result.
     """
-    sites = sorted(dates)
-    batches = [sites[i:i + MAX_STAT_SITES] for i in range(0, len(sites), MAX_STAT_SITES)]
+    by_day = {}
+    for site in sorted(dates):
+        by_day.setdefault(dates[site], []).append(site)
+    jobs = [(day, sites[i:i + MAX_SITES_PER_REQUEST])
+            for day, sites in by_day.items() for i in range(0, len(sites), MAX_SITES_PER_REQUEST)]
 
-    def fetch(batch):
+    def fetch(job):
+        (month, day), batch = job
+        when = f"{month:02d}-{day:02d}"
+        found, token = {}, None
         try:
-            text = get_text(STAT_SERVICE, format="rdb", sites=",".join(batch), statReportType="daily",
-                            statTypeCd="all", parameterCd=GAGE_HEIGHT)
-            rows = parse_rdb(text)
-            return {r["site_no"]: r for r in rows
-                    if r["site_no"] in dates and (int(r["month_nu"]), int(r["day_nu"])) == dates[r["site_no"]]}
-        except (requests.RequestException, KeyError, ValueError):
+            for _ in range(MAX_STAT_PAGES):
+                params = {"monitoring_location_id": [f"USGS-{site}" for site in batch], "parameter_code": GAGE_HEIGHT,
+                          "normal_type": "DOY", "start_date": when, "end_date": when, "page_size": 1000}
+                data = get_json(STATISTICS, **params, **({"next_token": token} if token else {}))
+                for f in data["features"]:
+                    site = site_of(f["properties"])
+                    rows = [stat_row(s["values"], month, day) for s in f["properties"]["data"]
+                            if s.get("parameter_code") == GAGE_HEIGHT and s.get("parent_statistic_id") == DAILY_MEAN]
+                    rows = [row for row in rows if row]
+                    if rows and site in batch:  # only the sites asked about, whatever comes back
+                        found[site] = max(rows, key=lambda row: int(row["count_nu"]))
+                token = data.get("next")
+                if not token:
+                    break
+        except (requests.RequestException, KeyError, TypeError, ValueError):
+            failed.extend(batch)
             return {}
+        return found
 
-    found = {}
+    found, failed = {}, []
     with ThreadPoolExecutor(max_workers=4) as pool:
-        for part in pool.map(fetch, batches):
+        for part in pool.map(fetch, jobs):
             found.update(part)
+    if failed:
+        say_missing(f"Statistics for this date unavailable for {gages_count(len(failed))}; they have no percentile "
+                    "for this date. Run it again later for those.")
     return found
+
+
+def stat_row(values, month, day):
+    """One series' statistics for a calendar day as a legacy statistics row: "count_nu" (years of
+    record), "min_va", "max_va" and the percentile columns of STAT_COLUMNS, as text, or None if the
+    series has nothing for that day. The current service gives no years for the record high and low,
+    and no first and last year of record, so those columns are absent and the popup leaves them out.
+    """
+    when = f"{month:02d}-{day:02d}"
+    columns = {pct: col for col, pct in STAT_COLUMNS}
+    row, years = {"month_nu": str(month), "day_nu": str(day)}, []
+    for v in values:
+        if v.get("time_of_year") != when:
+            continue
+        years.append(v.get("sample_count") or 0)
+        kind = v.get("computation")
+        if kind in ("minimum", "maximum"):
+            row["min_va" if kind == "minimum" else "max_va"] = v.get("value")
+        elif kind == "percentile":
+            for pct, value in zip(v.get("percentiles") or [], v.get("values") or []):
+                col = columns.get(float(pct))
+                if col and col not in ("min_va", "max_va"):
+                    row[col] = value
+    if not years:
+        return None
+    row["count_nu"] = str(max(years))
+    return row
 
 
 def long_term(stage, row):
@@ -827,15 +888,14 @@ def long_term(stage, row):
 
 
 def fetch_nws(site, lat, lon, nws_gauges):
-    """Find the NWS gauge co-located with this USGS site and return its flood stages."""
+    """Find the NWS gauge co-located with this USGS site and return its flood stages, or None if there
+    is none or it has no flood stages. A failed request for the gauge's record is raised, so the
+    caller can say the gage could not be checked rather than quietly drawing it as a diamond."""
     best = min(nws_gauges, key=lambda g: haversine_km(lat, lon, g["latitude"], g["longitude"]),
                default=None)
     if best is None or haversine_km(lat, lon, best["latitude"], best["longitude"]) > MATCH_RADIUS_KM:
         return None
-    try:
-        detail = get_json(f"{NWPS}/{best['lid']}")
-    except requests.RequestException:
-        return None
+    detail = get_json(f"{NWPS}/{best['lid']}")
     if detail.get("usgsId") != site:
         return None
     cats = (detail.get("flood") or {}).get("categories") or {}
@@ -850,11 +910,9 @@ def fetch_nws(site, lat, lon, nws_gauges):
 
 
 def fetch_forecast(lid, stages):
-    """NWS stage forecast for a gauge: series plus the forecast crest. None if no usable forecast."""
-    try:
-        data = get_json(f"{NWPS}/{lid}/stageflow/forecast")
-    except requests.RequestException:
-        return None
+    """NWS stage forecast for a gauge: series plus the forecast crest. None if no usable forecast. A
+    failed request is raised, so the caller can say the forecast is missing."""
+    data = get_json(f"{NWPS}/{lid}/stageflow/forecast")
     if data.get("primaryUnits") != "ft":  # thresholds are in feet; don't compare flow to them
         return None
     now = datetime.now(timezone.utc)
@@ -949,17 +1007,37 @@ def build_gages(anchor, distance_km, draw_retired=False, as_of=None, paths=None,
                 "lon": lon, "stage": stage, "time": when,
                 "recent": recent_stats(readings[site], now=as_of.timestamp() if as_of else None),
                 "longterm": long_term(stage, stats[site]) if site in stats else None}
-        flood = fetch_nws(site, lat, lon, nws)
+        try:
+            flood = fetch_nws(site, lat, lon, nws)
+        except requests.RequestException:
+            unchecked.append(site)
+            flood = None
         if flood:
+            forecast = None
+            if not as_of:
+                try:
+                    forecast = fetch_forecast(flood["lid"], flood["stages"])
+                except requests.RequestException:
+                    unforecast.append(site)
             gage.update(method="nws", lid=flood["lid"], stages=flood["stages"],
-                        category=flood_category(stage, flood["stages"]),
-                        forecast=None if as_of else fetch_forecast(flood["lid"], flood["stages"]))
+                        category=flood_category(stage, flood["stages"]), forecast=forecast)
         else:
             gage.update(method="percentile", pct=None)  # filled in below, once every gage's method is known
         return gage
 
+    unchecked, unforecast = [], []  # gages whose NWS gauge record or forecast request failed
     with ThreadPoolExecutor(max_workers=8) as pool:
         gages = list(pool.map(build, current))
+
+    def names(ids):
+        shown = [pretty_name(sites[site][0]) for site in sorted(ids, key=lambda s: -sites[s][1])]
+        return ", ".join(shown[:3]) + (f" and {len(shown) - 3} more" if len(shown) > 3 else "")
+    if unchecked:
+        say_missing(f"NWS gauge records unavailable for {gages_count(len(unchecked))} ({names(unchecked)}); "
+                    "drawn as diamonds, so any flood category they have is not shown. Run it again later for those.")
+    if unforecast:
+        say_missing(f"NWS forecasts unavailable for {gages_count(len(unforecast))} ({names(unforecast)}); "
+                    "they have no forecast ring or crest. Run it again later for those.")
     diamonds = [g for g in gages if g["method"] == "percentile"]
     histories = fetch_histories([g["site"] for g in diamonds], as_of) if diamonds else {}
     for g in diamonds:
@@ -1041,6 +1119,8 @@ def build_rivers(anchors, labels, distance_km, draw_retired=False, as_of=None):
                 by_site = fetch_drainage_areas([site_of[label] for label in by_river])
             except (requests.RequestException, KeyError, ValueError):
                 by_site = {}  # the rule then falls back to how far each walk went
+                say_missing("Drainage areas unavailable; at each confluence the river that carries on is chosen by "
+                            "how far each walk went instead, which can name the wrong one. Run it again later.")
             confluences = find_confluences(
                 paths, {label: by_site.get(site_of[label]) for label in by_river}, detail=True)
         except (KeyError, ValueError, IndexError, TypeError) as err:  # a flowline in an unexpected shape

@@ -43,9 +43,10 @@ class TestFetchNws:
         assert sg.fetch_nws(SITE, LAT, LON, []) is None
         assert calls == []
 
-    def test_request_failure(self, route):
+    def test_a_failed_request_is_raised_not_taken_for_no_gauge(self, route):
         route({"/gauges/ARCF1": requests.ConnectionError("down")})
-        assert sg.fetch_nws(SITE, LAT, LON, [ARCF1]) is None
+        with pytest.raises(requests.ConnectionError):
+            sg.fetch_nws(SITE, LAT, LON, [ARCF1])
 
     def test_missing_stages_are_dropped(self, route, fixture):
         detail = fixture("nwps_gauge_arcf1.json")
@@ -131,6 +132,7 @@ class TestFetchForecast:
         assert self.run(route, forecast([])) is None
         assert self.run(route, {"primaryUnits": "ft"}) is None
 
-    def test_request_failure(self, route):
+    def test_a_failed_request_is_raised_not_taken_for_no_forecast(self, route):
         route({"/stageflow/forecast": requests.HTTPError("404")})
-        assert sg.fetch_forecast("ARCF1", STAGES) is None
+        with pytest.raises(requests.HTTPError):
+            sg.fetch_forecast("ARCF1", STAGES)

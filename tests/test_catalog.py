@@ -41,20 +41,6 @@ def catalog_rows(route):
     return collections.defaultdict(list, sg.fetch_catalog(CATALOG_SITES))
 
 
-class TestParseRdb:
-    def test_skips_comments_and_the_column_type_line(self):
-        text = "# header comment\n# another\nsite_no\tparm_cd\n5s\t5s\n01\t00065\n02\t00060\n"
-        assert sg.parse_rdb(text) == [{"site_no": "01", "parm_cd": "00065"},
-                                      {"site_no": "02", "parm_cd": "00060"}]
-
-    @pytest.mark.parametrize("text", ["", "# only comments\n", "site_no\n", "site_no\n5s\n"])
-    def test_no_rows(self, text):
-        assert sg.parse_rdb(text) == []
-
-    def test_blank_fields_are_kept(self):
-        assert sg.parse_rdb("a\tb\n5s\t5s\n1\t\n") == [{"a": "1", "b": ""}]
-
-
 class TestClassifySite:
     def test_a_stage_record_that_ended_years_ago_is_retired(self, catalog_rows):
         category, info = sg.classify_site(catalog_rows["02298300"], NOW)  # Punta Gorda
@@ -308,7 +294,14 @@ class TestBuildGagesWithRetired:
         monkeypatch.setattr(sg, "fetch_catalog", broken)
         _, gages, retired = sg.build_gages("anchor", 322, draw_retired=True)
         assert len(gages) == 2 and retired == []
-        assert "4 not (site details unavailable)" in capsys.readouterr().err
+        assert "4 not (site details unavailable; retired gages cannot be drawn this time)" in capsys.readouterr().err
+
+    def test_without_retired_gages_asked_for_a_failed_catalog_says_only_that(self, river, monkeypatch, capsys):
+        def broken(ids):
+            raise requests.ConnectionError("down")
+        monkeypatch.setattr(sg, "fetch_catalog", broken)
+        sg.build_gages("anchor", 322)
+        assert "4 not (site details unavailable)\n" in capsys.readouterr().err
 
     def test_everything_reporting_makes_no_catalog_request(self, river, monkeypatch):
         sites = {k: v for k, v in SITES.items() if k in ("A0000001", "B0000002")}

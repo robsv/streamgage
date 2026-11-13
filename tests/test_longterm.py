@@ -1,5 +1,7 @@
 """The percentile for this calendar date over every year of record (USGS daily statistics)."""
 
+import copy
+import json
 from datetime import datetime, timedelta
 
 import pytest
@@ -8,18 +10,18 @@ import requests
 import streamgage as sg
 from tests.conftest import FIXTURES, gage
 
-STATS_TEXT = (FIXTURES / "daily_stats.rdb").read_text()  # four real Peace River gages, a few days each
-ROWS = sg.parse_rdb(STATS_TEXT)
+STATS = json.loads((FIXTURES / "daily_statistics.json").read_text())  # four real Peace River gages, a few days each
 
 
 def real_row(site, month=11, day=5):
-    return next(r for r in ROWS if r["site_no"] == site and (r["month_nu"], r["day_nu"]) == (str(month), str(day)))
+    feature = next(f for f in STATS["features"] if f["properties"]["monitoring_location_id"] == f"USGS-{site}")
+    return sg.stat_row(feature["properties"]["data"][0]["values"], month, day)
 
 
 ARCADIA = real_row("02296750")     # 95 years; min -0.07 .. max 8.57; median 2.44
-FORT_MEADE = real_row("02294898")  # 53 years
-DOVER_SINK = real_row("02294705")  # 18 years; the p05 and p95 columns are blank
-TEN_YEARS = real_row("02295440")   # exactly 10 years; p05 and p95 blank
+FORT_MEADE = real_row("02294898")  # 58 years
+DOVER_SINK = real_row("02294705")  # 18 years; the 5th and 95th percentiles are blank ("nan")
+TEN_YEARS = real_row("02295440")   # exactly 10 years; the 5th and 95th blank
 
 
 def stat_row(**over):
@@ -34,11 +36,11 @@ def stat_row(**over):
 class TestLongTermPercentile:
     @pytest.mark.parametrize("stage, expected", [
         (2.44, 50.0),    # exactly the median
-        (0.73, 5.0),     # exactly the 5th percentile
-        (6.21, 95.0),    # exactly the 95th
+        (0.734, 5.0),    # exactly the 5th percentile
+        (6.212, 95.0),   # exactly the 95th
         (3.0, 61.8),     # between the 50th (2.44) and 75th (3.63): 50 + 25 * 0.56 / 1.19
-        (7.4, 97.5),     # between the 95th (6.21) and the maximum (8.57): 95 + 5 * 1.19 / 2.36
-        (0.0, 0.4),      # between the minimum (-0.07) and the 5th (0.73): 5 * 0.07 / 0.80
+        (7.4, 97.5),     # between the 95th (6.212) and the maximum (8.57): 95 + 5 * 1.188 / 2.358
+        (0.0, 0.4),      # between the minimum (-0.07) and the 5th (0.734): 5 * 0.07 / 0.804
     ])
     def test_interpolates_between_the_published_points(self, stage, expected):
         result = sg.long_term(stage, ARCADIA)
@@ -46,8 +48,8 @@ class TestLongTermPercentile:
         assert result["pct"] == pytest.approx(expected, abs=0.05)
 
     def test_fort_meade_is_the_88th(self):
-        # 74.48 ft lies between the 80th (73.36) and 90th (74.77): 80 + 10 * 1.12 / 1.41
-        assert sg.long_term(74.48, FORT_MEADE)["pct"] == pytest.approx(87.9, abs=0.05)
+        # 74.48 ft lies between the 75th (72.93) and 90th (74.653), with no 80th: 75 + 15 * 1.55 / 1.723
+        assert sg.long_term(74.48, FORT_MEADE)["pct"] == pytest.approx(88.5, abs=0.05)
 
     def test_the_extremes_are_inside_the_record(self):
         top = sg.long_term(8.57, ARCADIA)
@@ -65,9 +67,9 @@ class TestLongTermPercentile:
         assert (result["status"], result["pct"]) == ("below", 0.0)
 
     def test_blank_percentile_columns_are_skipped(self):
-        # Dover Sink has no p05 or p95: between the 90th (90.51) and the maximum (91.46)
+        # Dover Sink has no p05 or p95: between the 90th (90.506) and the maximum (91.46)
         assert sg.long_term(91.0, DOVER_SINK)["pct"] == pytest.approx(95.2, abs=0.05)
-        # and between the minimum (75.33) and the 10th (80.05), since the p05 is missing
+        # and between the minimum (75.33) and the 10th (80.046), since the p05 is missing
         assert sg.long_term(77.0, DOVER_SINK)["pct"] == pytest.approx(3.5, abs=0.05)
 
     def test_a_flat_stretch_takes_the_middle_of_its_percentile_span(self):
@@ -94,11 +96,17 @@ class TestLongTermPercentile:
 class TestLongTermRecord:
     def test_what_the_popup_shows_about_the_record(self):
         result = sg.long_term(2.0, ARCADIA)
-        assert result["years"] == 95 and (result["first"], result["last"]) == (1932, 2026)
+        assert result["years"] == 95
         assert (result["month"], result["day"]) == (11, 5)
         assert result["median"] == 2.44
-        assert (result["high"], result["high_year"]) == (8.57, 2006)
-        assert (result["low"], result["low_year"]) == (-0.07, 1943)
+        assert (result["high"], result["low"]) == (8.57, -0.07)
+        # the service gives no years for the record or the span, and the popup leaves them out
+        assert (result["first"], result["last"], result["high_year"], result["low_year"]) == (None,) * 4
+
+    def test_the_legacy_years_are_still_shown_when_a_row_has_them(self):
+        row = dict(ARCADIA, begin_yr="1932", end_yr="2026", max_va_yr="2006", min_va_yr="1943")
+        result = sg.long_term(2.0, row)
+        assert (result["first"], result["last"], result["high_year"], result["low_year"]) == (1932, 2026, 2006, 1943)
 
     def test_short_record_is_refused(self):
         assert sg.long_term(2.0, dict(ARCADIA, count_nu="9")) is None
@@ -106,7 +114,7 @@ class TestLongTermRecord:
         assert sg.MIN_STAT_YEARS == 10
 
     def test_the_ten_year_gage_is_accepted(self):
-        result = sg.long_term(43.55, TEN_YEARS)
+        result = sg.long_term(43.545, TEN_YEARS)
         assert result["years"] == 10 and result["pct"] == pytest.approx(50.0)
 
     @pytest.mark.parametrize("count", ["", "many", None])
@@ -154,70 +162,159 @@ class TestReadingDay:
 FIXTURE_SITES = ["02296750", "02294898", "02294705", "02295440"]
 
 
+def series(site, years, value=1.0, when="11-05", of="00003"):
+    """One site's statistics for a day: the minimum, maximum and percentiles of a record of `years`,
+    computed from one kind of daily value (`of`: 00003 the mean, 00001 the maximum, 00002 the minimum)."""
+    point = {"time_of_year": when, "sample_count": years}
+    return {"type": "Feature", "properties": {"monitoring_location_id": f"USGS-{site}", "data": [{
+        "parameter_code": "00065", "parent_statistic_id": of, "values": [
+            point | {"computation": "minimum", "value": str(value - 1)},
+            point | {"computation": "maximum", "value": str(value + 1)},
+            point | {"computation": "percentile", "percentiles": ["50"], "values": [str(value)]}]}]}}
+
+
+class TestStatRow:
+    def test_takes_the_legacy_row_shape(self):
+        assert ARCADIA == {"month_nu": "11", "day_nu": "5", "count_nu": "95", "min_va": "-0.07", "max_va": "8.57",
+                           "p05_va": "0.734", "p10_va": "0.912", "p25_va": "1.57", "p50_va": "2.44",
+                           "p75_va": "3.63", "p90_va": "5.086", "p95_va": "6.212"}
+
+    def test_a_day_the_series_has_nothing_for_gives_none(self):
+        values = STATS["features"][0]["properties"]["data"][0]["values"]
+        assert sg.stat_row(values, 7, 4) is None
+
+    def test_a_percentile_the_columns_do_not_name_is_ignored(self):
+        values = [{"time_of_year": "11-05", "sample_count": 30, "computation": "percentile",
+                   "percentiles": ["33", "50"], "values": ["1", "2"]}]
+        assert sg.stat_row(values, 11, 5) == {"month_nu": "11", "day_nu": "5", "count_nu": "30", "p50_va": "2"}
+
+
 class TestFetchDailyStats:
     def test_picks_each_sites_own_day(self, route):
-        route({sg.STAT_SERVICE: STATS_TEXT})
+        route({sg.STATISTICS: STATS})
         found = sg.fetch_daily_stats({"02296750": (11, 5), "02294898": (11, 6)})
         assert set(found) == {"02296750", "02294898"}
         assert (found["02296750"]["month_nu"], found["02296750"]["day_nu"]) == ("11", "5")
         assert (found["02294898"]["month_nu"], found["02294898"]["day_nu"]) == ("11", "6")
 
     def test_a_leap_day_is_found(self, route):
-        route({sg.STAT_SERVICE: STATS_TEXT})
+        route({sg.STATISTICS: STATS})
         found = sg.fetch_daily_stats({"02296750": (2, 29)})
         assert found["02296750"]["day_nu"] == "29" and found["02296750"]["month_nu"] == "2"
 
     def test_a_site_the_service_has_nothing_for_is_absent(self, route):
-        route({sg.STAT_SERVICE: STATS_TEXT})
+        route({sg.STATISTICS: STATS})
         found = sg.fetch_daily_stats({"02296750": (11, 5), "02297345": (11, 5)})  # Platt: none
         assert set(found) == {"02296750"}
 
-    def test_a_day_with_no_row_is_absent(self, route):
-        route({sg.STAT_SERVICE: STATS_TEXT})
+    def test_a_day_with_no_statistics_is_absent(self, route):
+        route({sg.STATISTICS: STATS})
         assert sg.fetch_daily_stats({"02296750": (7, 4)}) == {}  # the fixture has only a few days
 
-    def test_asks_for_every_statistic_of_gage_height_by_day(self, route):
-        calls = route({sg.STAT_SERVICE: STATS_TEXT})
+    def test_asks_for_gage_height_on_the_day(self, route):
+        calls = route({sg.STATISTICS: STATS})
         sg.fetch_daily_stats({site: (11, 5) for site in FIXTURE_SITES})
-        _, params = calls[0]
-        assert params["statReportType"] == "daily" and params["statTypeCd"] == "all"
-        assert params["parameterCd"] == "00065" and params["format"] == "rdb"
-        assert params["sites"] == ",".join(sorted(FIXTURE_SITES))
+        (_, params), = calls
+        assert params["monitoring_location_id"] == [f"USGS-{s}" for s in sorted(FIXTURE_SITES)]
+        assert params["parameter_code"] == "00065" and params["normal_type"] == "DOY"
+        assert (params["start_date"], params["end_date"]) == ("11-05", "11-05")
 
-    def test_batches_at_the_services_limit_of_ten_sites(self, route):
-        sites = {f"{i:08d}": (11, 5) for i in range(25)}
-        calls = route({sg.STAT_SERVICE: "site_no\n5s\n"})
+    def test_sites_on_different_days_go_in_their_own_requests(self, route):
+        calls = route({sg.STATISTICS: STATS})
+        sg.fetch_daily_stats({"02296750": (11, 5), "02294898": (11, 6), "02294705": (11, 5)})
+        asked = sorted((p["start_date"], p["monitoring_location_id"]) for _, p in calls)
+        assert asked == [("11-05", ["USGS-02294705", "USGS-02296750"]), ("11-06", ["USGS-02294898"])]
+
+    def test_sites_go_in_batches(self, route):
+        calls = route({sg.STATISTICS: {"features": []}})
+        sg.fetch_daily_stats({f"{i:08d}": (11, 5) for i in range(250)})
+        assert sorted(len(p["monitoring_location_id"]) for _, p in calls) == [50, 100, 100]
+
+    def test_a_site_with_two_series_keeps_the_longer_record(self, route):
+        two = series("03039040", 9, value=5.0)
+        two["properties"]["data"] += series("03039040", 11, value=7.0)["properties"]["data"]
+        route({sg.STATISTICS: {"features": [two]}})
+        row = sg.fetch_daily_stats({"03039040": (11, 5)})["03039040"]
+        assert (row["count_nu"], row["p50_va"]) == ("11", "7.0")
+
+    def test_only_statistics_of_the_daily_mean_are_used(self, route):
+        # Platt publishes only a daily maximum and minimum: the service has statistics of each, with a
+        # 16-year record, but comparing a stage with the record of daily maxima would read high
+        platt = series("02297345", 16, of="00001")
+        platt["properties"]["data"] += series("02297345", 16, of="00002")["properties"]["data"]
+        route({sg.STATISTICS: {"features": [platt]}})
+        assert sg.fetch_daily_stats({"02297345": (11, 5)}) == {}
+
+    def test_a_longer_record_of_maxima_does_not_beat_the_means(self, route):
+        both = series("02299230", 9, value=5.0)
+        both["properties"]["data"] += series("02299230", 15, value=7.0, of="00001")["properties"]["data"]
+        route({sg.STATISTICS: {"features": [both]}})
+        row = sg.fetch_daily_stats({"02299230": (11, 5)})["02299230"]
+        assert (row["count_nu"], row["p50_va"]) == ("9", "5.0")
+
+    def test_follows_the_next_page(self, route):
+        pages = {None: {"features": [series("00000001", 20)], "next": "abc"},
+                 "abc": {"features": [series("00000002", 30)], "next": None}}
+        calls = route({sg.STATISTICS: lambda params: pages[params.get("next_token")]})
+        assert set(sg.fetch_daily_stats({"00000001": (11, 5), "00000002": (11, 5)})) == {"00000001", "00000002"}
+        assert [p.get("next_token") for _, p in calls] == [None, "abc"]
+
+    def test_a_next_page_that_never_ends_is_given_up(self, route, monkeypatch):
+        monkeypatch.setattr(sg, "MAX_STAT_PAGES", 3)
+        calls = route({sg.STATISTICS: {"features": [series("00000001", 20)], "next": "again"}})
+        assert set(sg.fetch_daily_stats({"00000001": (11, 5)})) == {"00000001"}
+        assert len(calls) == 3
+
+    def test_a_failed_batch_does_not_lose_the_others(self, route):
+        sites = {f"{i:08d}": (11, 5) for i in range(100)}  # a whole first batch
+        sites["02296750"] = (11, 5)                         # sorts after them: the second batch
+
+        def respond(params):
+            if "USGS-00000000" in params["monitoring_location_id"]:
+                raise requests.ConnectionError("down")
+            return STATS
+        route({sg.STATISTICS: respond})
+        assert set(sg.fetch_daily_stats(sites)) == {"02296750"}
+
+    def test_a_failed_batch_is_said_with_how_many_gages_it_cost(self, route, capsys):
+        sites = {f"{i:08d}": (11, 5) for i in range(100)}
+        sites["02296750"] = (11, 5)
+
+        def respond(params):
+            if "USGS-00000000" in params["monitoring_location_id"]:
+                raise requests.ConnectionError("down")
+            return STATS
+        route({sg.STATISTICS: respond})
         sg.fetch_daily_stats(sites)
-        assert sorted(len(p["sites"].split(",")) for _, p in calls) == [5, 10, 10]
-        assert sg.MAX_STAT_SITES == 10
+        assert "Statistics for this date unavailable for 100 gages;" in capsys.readouterr().err
+
+    def test_success_says_nothing(self, route, capsys):
+        route({sg.STATISTICS: STATS})
+        sg.fetch_daily_stats({"02296750": (11, 5), "02297345": (11, 5)})  # one with none is not a failure
+        assert capsys.readouterr().err == ""
 
     def test_no_sites_makes_no_request(self, route):
         calls = route({})
         assert sg.fetch_daily_stats({}) == {}
         assert calls == []
 
-    def test_a_failed_batch_does_not_lose_the_others(self, route):
-        sites = {f"{i:08d}": (11, 5) for i in range(12)}  # two batches: 00000000-9 and 10-11
-        sites["02296750"] = (11, 5)                        # sorts after them: the second batch
-
-        def respond(params):
-            if "00000000" in params["sites"]:
-                raise requests.ConnectionError("down")
-            return STATS_TEXT
-        route({sg.STAT_SERVICE: respond})
-        assert set(sg.fetch_daily_stats(sites)) == {"02296750"}
-
     @pytest.mark.parametrize("error", [requests.ConnectionError("down"), requests.Timeout("slow"),
                                        requests.HTTPError("400")])
-    def test_every_batch_failing_gives_no_statistics_not_an_error(self, route, error):
-        route({sg.STAT_SERVICE: error})
+    def test_every_batch_failing_gives_no_statistics_not_an_error(self, route, error, capsys):
+        route({sg.STATISTICS: error})
+        assert sg.fetch_daily_stats({"02296750": (11, 5)}) == {}
+        assert "Statistics for this date unavailable for 1 gage;" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("body", [{"oops": 1}, {"features": [{}]}, {"features": [{"properties": {}}]}])
+    def test_an_unexpected_response_gives_no_statistics_not_an_error(self, route, body):
+        route({sg.STATISTICS: body})
         assert sg.fetch_daily_stats({"02296750": (11, 5)}) == {}
 
-    def test_an_unexpected_response_gives_no_statistics_not_an_error(self, route):
-        route({sg.STAT_SERVICE: "<html>Error report</html>"})
-        assert sg.fetch_daily_stats({"02296750": (11, 5)}) == {}
-        route({sg.STAT_SERVICE: "site_no\tmonth_nu\n5s\t2n\n02296750\tNov\n"})  # not a number
-        assert sg.fetch_daily_stats({"02296750": (11, 5)}) == {}
+    def test_the_fixture_is_not_changed_by_reading_it(self, route):
+        before = copy.deepcopy(STATS)
+        route({sg.STATISTICS: STATS})
+        sg.fetch_daily_stats({site: (11, 5) for site in FIXTURE_SITES})
+        assert STATS == before
 
 
 class TestPercentileLabel:
@@ -259,20 +356,20 @@ class TestBuildGagesWithStatistics:
         monkeypatch.setattr(sg, "fetch_nws", lambda site, lat, lon, gauges: (
             {"lid": "ARCF1", "stages": {"major": 16}} if site == "02296750" else None))
         monkeypatch.setattr(sg, "fetch_forecast", lambda lid, stages: None)
-        return route({sg.NWPS: {"gauges": []}, sg.STAT_SERVICE: STATS_TEXT})
+        return route({sg.NWPS: {"gauges": []}, sg.STATISTICS: STATS})
 
     def test_every_gage_gets_its_long_term_percentile_or_none(self, river):
         by_site = {g["site"]: g for g in sg.build_gages("anchor", 322)[1]}
         assert by_site["02296750"]["longterm"]["status"] == "above"    # a circle gets it too
         assert by_site["02296750"]["method"] == "nws"
-        assert by_site["02294898"]["longterm"]["pct"] == pytest.approx(87.9, abs=0.05)
+        assert by_site["02294898"]["longterm"]["pct"] == pytest.approx(88.5, abs=0.05)
         assert by_site["02299999"]["longterm"] is None
 
     def test_the_statistics_are_requested_once_for_every_reporting_gage(self, river):
         sg.build_gages("anchor", 322)
-        stat_calls = [p for url, p in river if url == sg.STAT_SERVICE]
+        stat_calls = [p for url, p in river if url == sg.STATISTICS]
         assert len(stat_calls) == 1
-        assert stat_calls[0]["sites"] == "02294898,02296750,02299999"
+        assert stat_calls[0]["monitoring_location_id"] == ["USGS-02294898", "USGS-02296750", "USGS-02299999"]
 
     def test_a_failed_statistics_request_leaves_the_rest_of_the_map_intact(self, river, monkeypatch):
         monkeypatch.setattr(sg, "fetch_daily_stats", lambda dates: {})
