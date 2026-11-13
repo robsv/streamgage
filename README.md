@@ -12,7 +12,8 @@
 Turns a river name into a single self-contained HTML map: the river as a line, every USGS stream gage
 on it as a colored marker, and a popup for each gage with its current stage, how it has moved over the
 last week, flood thresholds, and the National Weather Service (NWS) forecast crest where one exists.
-No API keys or accounts are needed; all data comes from free public U.S. government services.
+No API keys or accounts are needed; all data comes from free public U.S. government services. An
+optional free key raises one USGS service's hourly limit (see [An API key](#an-api-key-optional)).
 
 > **Important: not for safety decisions.** This is a personal data-visualization tool. The readings
 > are USGS provisional data and the forecasts are NWS products, drawn as a snapshot of the moment the
@@ -84,6 +85,23 @@ pixi install
 ```
 
 Without pixi, any Python 3.10+ with `pip install requests` works too.
+
+### An API key (optional)
+
+The USGS Water Data API, which the tool uses for the name lookup and the gage readings,
+limits how many requests one computer can make in an hour without a key. Several large maps in a row,
+such as the six Pittsburgh rivers, can use that up, and the API then refuses requests for about 15
+minutes. A free key raises the limit. Get one at
+[api.waterdata.usgs.gov/signup](https://api.waterdata.usgs.gov/signup/) (it arrives by email), and put
+it in an environment variable, for example in `~/.zshrc`:
+
+```
+export WATERDATA_API_KEY=your-key-here
+```
+
+The tool then sends it with every request to that API, in a header so that it never appears in an error
+message, and to no other service. Without the variable, everything works as before. If the USGS rejects
+the key, the run stops with a message naming the variable to check.
 
 ## 2. Run it
 
@@ -427,7 +445,8 @@ Things to know:
 - **A long run.** Every river does its own gage lookups, so a run takes about as long per river as it
   does alone.
 - **Rate limits.** The services sometimes answer "too many requests" (HTTP 429), the NWS most often,
-  and more so when several rivers make many requests in a row. The tool waits and retries (2, 5, 10, 20
+  and more so when several rivers make many requests in a row. The USGS Water Data API's hourly limit
+  is lower without a key (see [An API key](#an-api-key-optional)). The tool waits and retries (2, 5, 10, 20
   and 30 seconds, or as long as the service asks, up to a minute) for 429 and 502, 503 or 504 answers;
   other errors are not retried. If the NWS still refuses after that, the run does not stop: the rest
   of it skips the NWS, and the gages are colored by percentile with no flood categories or forecasts,

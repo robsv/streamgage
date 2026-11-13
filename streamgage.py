@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Draw an interactive map of a river with USGS gages colored by current stage.
 
-Data sources (all public, no API key):
+Data sources (all public; no API key needed, though one raises a USGS rate limit):
   * USGS NLDI           - river flowlines and gages along the main stem
   * USGS Water Data API - the last 7 days of gage height (00065) readings, gage time zones
   * USGS Water Services - 365 days of daily values, daily statistics, the site catalog
@@ -30,6 +30,7 @@ import html
 import io
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -64,7 +65,9 @@ PARAM_NAMES = {GAGE_HEIGHT: "stage", "00060": "discharge", "00010": "water tempe
 CATEGORY_LABELS = (("discharge_only", "discharge only"), ("offline", "offline"), ("retired", "retired"),
                    ("field_visits", "field visits only"), ("water_quality", "water quality only"),
                    ("other", "other data only"), ("no_data", "no data"))
-OGCAPI = "https://api.waterdata.usgs.gov/ogcapi/v1/collections"
+WATERDATA = "https://api.waterdata.usgs.gov/"  # the USGS Water Data API, the only service a key is sent to
+API_KEY_VARIABLE = "WATERDATA_API_KEY"  # an optional free key for it, which raises its hourly limit
+OGCAPI = f"{WATERDATA}ogcapi/v1/collections"
 MONITORING = f"{OGCAPI}/monitoring-locations/items"
 CONTINUOUS_ITEMS = f"{OGCAPI}/continuous/items"  # readings from the gages' sensors, every 15 minutes at most gages
 TIME_SERIES = f"{OGCAPI}/time-series-metadata/items"  # what each series is, such as a gage's primary or backup sensor
@@ -106,8 +109,12 @@ def get(url, params):
     A service that asks for more than MAX_RETRY_AFTER seconds (the USGS does, once its hourly limit is
     used up: about 12 minutes) is not retried, since the retries would all fail. The error says how long
     to wait instead."""
+    headers = api_headers(url)
     for delay in (*RETRY_DELAYS, None):
-        r = session.get(url, params=params, timeout=60)
+        r = session.get(url, params=params, timeout=60, headers=headers)
+        if r.status_code == 403 and headers:
+            raise requests.HTTPError(f"403 from {url.split('?')[0]}: the USGS refused the key in {API_KEY_VARIABLE}; "
+                                     "check it, or unset the variable to run without one", response=r)
         if r.status_code not in RETRY_STATUSES or delay is None:
             r.raise_for_status()
             return r
@@ -122,6 +129,14 @@ def get(url, params):
         wait = max(delay, asked)
         print(f"  {r.status_code} from {url.split('?')[0]}; retrying in {wait:g} s", file=sys.stderr)
         time.sleep(wait)
+
+
+def api_headers(url):
+    """The X-Api-Key header for a request to the USGS Water Data API when WATERDATA_API_KEY is set, and
+    None otherwise. The key is sent to no other service, and it travels in a header rather than the URL
+    so that error messages, which quote the URL, never show it."""
+    key = os.environ.get(API_KEY_VARIABLE, "").strip()
+    return {"X-Api-Key": key} if key and url.startswith(WATERDATA) else None
 
 
 def is_refusal(err):
