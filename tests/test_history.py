@@ -105,9 +105,15 @@ class TestFetchHistories:
 
     @pytest.mark.parametrize("error", [requests.ConnectionError("down"), requests.Timeout("slow"),
                                        requests.HTTPError("500")])
-    def test_a_failed_request_gives_no_histories_instead_of_stopping_the_run(self, route, error):
+    def test_a_failed_request_gives_no_histories_instead_of_stopping_the_run(self, route, error, capsys):
         route({sg.DAILY_ITEMS: error})
         assert sg.fetch_histories(SITES) == {}
+        assert "Past-year daily values unavailable for 3 gages" in capsys.readouterr().err
+
+    def test_success_says_nothing(self, route, daily, capsys):
+        route({sg.DAILY_ITEMS: write(daily)})
+        sg.fetch_histories(SITES)
+        assert capsys.readouterr().err == ""
 
     def test_statistic_codes(self):
         assert (sg.DAILY_MAX, sg.DAILY_MIN, sg.DAILY_MEAN) == ("00001", "00002", "00003")

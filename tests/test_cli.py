@@ -60,6 +60,32 @@ class TestBuildGages:
         assert platt["pct"] == 72.5  # 29 of the 40 stub history values (0.0 to 3.9) are <= 2.89
         assert "forecast" not in platt and "stages" not in platt
 
+    def test_a_run_with_nothing_missing_says_nothing_about_it(self, river, capsys):
+        sg.build_gages("02298300", 322)
+        assert "unavailable" not in capsys.readouterr().err
+
+    def test_a_failed_nws_gauge_record_is_said_not_silently_drawn_as_a_diamond(self, river, monkeypatch, capsys):
+        def fetch_nws(site, lat, lon, gauges):
+            if site == "02296750":
+                raise sg.requests.HTTPError("429 too many requests")
+        monkeypatch.setattr(sg, "fetch_nws", fetch_nws)
+        by_site = {g["site"]: g for g in sg.build_gages("02298300", 322)[1]}
+        assert by_site["02296750"]["method"] == "percentile"  # still drawn, as a diamond
+        err = capsys.readouterr().err
+        assert "NWS gauge records unavailable for 1 gage (Peace River At SR 70 At Arcadia, FL)" in err
+        assert "drawn as diamonds" in err
+
+    def test_a_failed_forecast_is_said_not_silently_left_out(self, river, monkeypatch, capsys):
+        def fetch_forecast(lid, stages):
+            raise sg.requests.ConnectionError("down")
+        monkeypatch.setattr(sg, "fetch_forecast", fetch_forecast)
+        arcadia = {g["site"]: g for g in sg.build_gages("02298300", 322)[1]}["02296750"]
+        assert arcadia["method"] == "nws" and arcadia["category"] == "moderate" and arcadia["forecast"] is None
+        assert "NWS forecasts unavailable for 1 gage (Peace River At SR 70 At Arcadia, FL)" in capsys.readouterr().err
+
+    def test_gage_counts_read_naturally(self):
+        assert sg.gages_count(1) == "1 gage" and sg.gages_count(4) == "4 gages"
+
     def test_gages_without_statistics_have_no_long_term_percentile(self, river):
         assert [g["longterm"] for g in sg.build_gages("02298300", 322)[1]] == [None, None]
 
