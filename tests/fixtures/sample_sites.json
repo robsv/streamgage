@@ -1,0 +1,58 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -81.846193883366,
+     27.3025458652247
+    ]
+   },
+   "properties": {
+    "monitoringLocationIdentifier": "USGS-02295977",
+    "monitoringLocationName": "PEACE RIVER NEAR BROWNVILLE FL",
+    "monitoringLocationType": "Stream",
+    "monitoringLocationTypeCode": "ST",
+    "observedParameters": [
+     "00010",
+     "00080",
+     "00095",
+     "00191",
+     "00300",
+     "00301",
+     "00400",
+     "00405",
+     "00410",
+     "00440",
+     "00445",
+     "00618",
+     "00660",
+     "00900",
+     "00902",
+     "00915",
+     "00925",
+     "00930",
+     "00931",
+     "00932",
+     "00935",
+     "00940",
+     "00945",
+     "00950",
+     "00955",
+     "01040",
+     "01056",
+     "01130",
+     "70300",
+     "70301",
+     "70303",
+     "71851",
+     "71856"
+    ]
+   }
+  }
+ ],
+ "next": null,
+ "count": 1
+}

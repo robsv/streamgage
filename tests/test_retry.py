@@ -96,7 +96,7 @@ class TestApiKey:
         sg.get_json(self.URL, f="json")
         assert headers == [{"X-Api-Key": "abc123"}]
 
-    @pytest.mark.parametrize("url", [sg.NWPS, f"{sg.NWIS}/dv/", sg.NLDI])
+    @pytest.mark.parametrize("url", [sg.NWPS, sg.STAT_SERVICE, sg.NLDI])
     def test_no_other_service_is_sent_the_key(self, sent, monkeypatch, url):
         monkeypatch.setenv(sg.API_KEY_VARIABLE, "abc123")
         headers = sent()

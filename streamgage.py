@@ -3,8 +3,9 @@
 
 Data sources (all public; no API key needed, though one raises a USGS rate limit):
   * USGS NLDI           - river flowlines and gages along the main stem
-  * USGS Water Data API - the last 7 days of gage height (00065) readings, gage time zones
-  * USGS Water Services - 365 days of daily values, daily statistics, the site catalog
+  * USGS Water Data API - the last 7 days of gage height (00065) readings, 365 days of daily values,
+                          gage time zones, and what each site that is not reporting has measured
+  * USGS Water Services - daily statistics
   * NOAA NWPS           - NWS flood categories (action/minor/moderate/major)
 
 Gages with NWS flood stages are colored by flood category (circles). Gages
@@ -42,7 +43,6 @@ import requests
 
 NLDI = "https://api.water.usgs.gov/nldi/linked-data/nwissite"
 NWIS = "https://waterservices.usgs.gov/nwis"
-SITE_SERVICE = f"{NWIS}/site/"  # site catalog: what each site has ever measured
 STAT_SERVICE = f"{NWIS}/stat/"  # daily statistics over every year of record
 NWPS = "https://api.water.noaa.gov/nwps/v1/gauges"
 GAGE_HEIGHT = "00065"
@@ -71,8 +71,12 @@ OGCAPI = f"{WATERDATA}ogcapi/v1/collections"
 MONITORING = f"{OGCAPI}/monitoring-locations/items"
 CONTINUOUS_ITEMS = f"{OGCAPI}/continuous/items"  # readings from the gages' sensors, every 15 minutes at most gages
 TIME_SERIES = f"{OGCAPI}/time-series-metadata/items"  # what each series is, such as a gage's primary or backup sensor
+DAILY_ITEMS = f"{OGCAPI}/daily/items"  # one value per day: the mean, maximum and minimum
+FIELD_MEASUREMENTS = f"{OGCAPI}/field-measurements/items"  # what staff measured on visits to a site
+SAMPLE_SITES = f"{WATERDATA}samples-data/monitoring-locations"  # the sites with water-quality samples
 READINGS_SITES_PER_REQUEST = 100  # most sites on a river have no readings; a batch that overflows a page is split
-READINGS_PAGE = 50000  # the most rows the API returns at once; a full page may have been cut short
+HISTORY_SITES_PER_REQUEST = 40  # a year of daily mean, maximum and minimum for this many sites fits in a page
+PAGE_ROWS = 50000  # the most rows the API returns at once; a full page may have been cut short
 # hours from UTC of the standard time in each time zone USGS names for a gage
 ZONE_OFFSETS = {"AST": -4, "EST": -5, "CST": -6, "MST": -7, "PST": -8, "AKST": -9, "HST": -10}
 NO_DATA = -999  # NWIS/NWPS report missing values as -999, -9999 or -999999
@@ -375,45 +379,55 @@ def usable(value):
     return None if v <= NO_DATA or not math.isfinite(v) else v
 
 
+def fetch_csv(url, site_ids, per_request, properties, **params):
+    """The rows of a CSV query to the USGS Water Data API about many sites, as dicts.
+
+    Sites go `per_request` to a request, and the requests run in parallel. The CSV response gives no
+    sign that rows were cut off, so a batch that fills a whole page (PAGE_ROWS) is split in two and
+    asked again. A failed request is raised.
+    """
+    def fetch(batch):
+        text = get_text(url, f="csv", skipGeometry="true", limit=PAGE_ROWS, properties=properties,
+                        monitoring_location_id=",".join(f"USGS-{site}" for site in batch), **params)
+        rows = list(csv.DictReader(io.StringIO(text)))
+        if len(rows) >= PAGE_ROWS and len(batch) > 1:
+            half = len(batch) // 2
+            return fetch(batch[:half]) + fetch(batch[half:])
+        return rows
+
+    batches = [site_ids[i:i + per_request] for i in range(0, len(site_ids), per_request)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        return [row for rows in pool.map(fetch, batches) for row in rows]
+
+
+def site_of(row):
+    """The site number of a row from the USGS Water Data API, whose ids look like USGS-02296750."""
+    return row["monitoring_location_id"].removeprefix("USGS-")
+
+
 def fetch_readings(site_ids, as_of=None):
     """The last RECENT_DAYS of gage-height readings per site, as {site: [(epoch seconds, ft)]}, oldest
     first. The days end at `as_of` (an aware datetime) when given, and now otherwise. Sites with no
     usable reading in those days are left out.
 
-    Sites go READINGS_SITES_PER_REQUEST to a request, and the requests run in parallel. The CSV
-    response gives no sign that rows were cut off, so a batch that fills a whole page is split in two
-    and asked again. A site with more than one gage-height series (a backup sensor, say) keeps the one
-    series_rank puts first. A failed request is raised: without readings there is no map to draw.
+    Sites go READINGS_SITES_PER_REQUEST to a request (see fetch_csv). A site with more than one
+    gage-height series (a backup sensor, say) keeps the one series_rank puts first. A failed request
+    is raised: without readings there is no map to draw.
     """
     end = as_of or datetime.now(timezone.utc)
     window = (f"{(end - timedelta(days=RECENT_DAYS)).isoformat(timespec='minutes')}/"
               f"{end.isoformat(timespec='minutes')}")
-
-    def fetch(batch):
-        text = get_text(CONTINUOUS_ITEMS, f="csv", skipGeometry="true", limit=READINGS_PAGE,
-                        monitoring_location_id=",".join(f"USGS-{site}" for site in batch),
-                        parameter_code=GAGE_HEIGHT, datetime=window,
-                        properties="monitoring_location_id,time_series_id,time,value")
-        rows = list(csv.DictReader(io.StringIO(text)))
-        if len(rows) >= READINGS_PAGE and len(batch) > 1:
-            half = len(batch) // 2
-            return fetch(batch[:half]) + fetch(batch[half:])
-        return rows
-
-    batches = [site_ids[i:i + READINGS_SITES_PER_REQUEST]
-               for i in range(0, len(site_ids), READINGS_SITES_PER_REQUEST)]
+    rows = fetch_csv(CONTINUOUS_ITEMS, site_ids, READINGS_SITES_PER_REQUEST,
+                     "monitoring_location_id,time_series_id,time,value", parameter_code=GAGE_HEIGHT, datetime=window)
     series = {}  # (site, series id) -> [(epoch seconds, ft)]
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        for rows in pool.map(fetch, batches):
-            for row in rows:
-                stage = usable(row.get("value"))
-                try:
-                    when = datetime.fromisoformat(row["time"]).timestamp()
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if stage is not None:
-                    site = row["monitoring_location_id"].removeprefix("USGS-")
-                    series.setdefault((site, row.get("time_series_id")), []).append((when, stage))
+    for row in rows:
+        stage = usable(row.get("value"))
+        try:
+            when = datetime.fromisoformat(row["time"]).timestamp()
+        except (KeyError, TypeError, ValueError):
+            continue
+        if stage is not None:
+            series.setdefault((site_of(row), row.get("time_series_id")), []).append((when, stage))
     for pts in series.values():
         pts.sort()
     by_site = {}
@@ -550,14 +564,49 @@ def parse_rdb(text):
 
 
 def fetch_catalog(site_ids):
-    """What each site has ever measured: {site: [data series rows]} from the USGS site catalog."""
+    """What each site has measured: {site: [rows]}, each row shaped like the legacy USGS site catalog's
+    ({"parm_cd", "data_type_cd", "begin_date", "end_date"}), for classify_site.
+
+    The data series come from the USGS series catalog, with "uv" for a continuous record, "dv" for a
+    daily one and "other" for the rest (annual peaks, say). A series with no dates at all holds no data
+    (the catalog lists some such, even for gages whose old record was not carried over), so it is left
+    out. Field visits ("sv") and water-quality samples ("qw") are not in that catalog, so they are
+    looked up only for the sites with no continuous record of anything (a reservoir with a lake-level
+    gage is "other", not "field visits"), and samples only for those of them with no field visits,
+    since those come first. A failed request is raised.
+    """
+    kinds = {"Points": "uv", "Daily": "dv"}
     catalog = {}
-    for i in range(0, len(site_ids), MAX_SITES_PER_REQUEST):
-        text = get_text(SITE_SERVICE, format="rdb", sites=",".join(site_ids[i:i + MAX_SITES_PER_REQUEST]),
-                        seriesCatalogOutput="true", siteStatus="all")
-        for row in parse_rdb(text):
-            catalog.setdefault(row["site_no"], []).append(row)
+    for row in fetch_csv(TIME_SERIES, site_ids, MAX_SITES_PER_REQUEST,
+                         "monitoring_location_id,parameter_code,computation_period_identifier,begin,end"):
+        if not (row.get("begin") or row.get("end")):
+            continue
+        catalog.setdefault(site_of(row), []).append({
+            "parm_cd": row["parameter_code"], "data_type_cd": kinds.get(row["computation_period_identifier"], "other"),
+            "begin_date": (row.get("begin") or "")[:10], "end_date": (row.get("end") or "")[:10]})
+    bare = [site for site in site_ids
+            if not any(r["data_type_cd"] in CONTINUOUS and r["end_date"] for r in catalog.get(site, []))]
+    visited = {site_of(row) for row in fetch_csv(FIELD_MEASUREMENTS, bare, MAX_SITES_PER_REQUEST,
+                                                 "monitoring_location_id")} if bare else set()
+    unvisited = [site for site in bare if site not in visited]
+    sampled = fetch_sample_sites(unvisited) if unvisited else set()
+    for site in visited:
+        catalog.setdefault(site, []).append({"parm_cd": "", "data_type_cd": "sv", "begin_date": "", "end_date": ""})
+    for site in sampled:
+        catalog.setdefault(site, []).append({"parm_cd": "", "data_type_cd": "qw", "begin_date": "", "end_date": ""})
     return catalog
+
+
+def fetch_sample_sites(site_ids):
+    """The sites among these with water-quality samples, from the USGS samples API, which lists only
+    sites with at least one sample (its "locations" list does not: it has sites with none). A failed
+    request is raised."""
+    found = set()
+    for i in range(0, len(site_ids), MAX_SITES_PER_REQUEST):
+        batch = [f"USGS-{site}" for site in site_ids[i:i + MAX_SITES_PER_REQUEST]]
+        for f in get_json(SAMPLE_SITES, monitoringLocationIdentifier=batch, pageSize=1000)["features"]:
+            found.add(f["properties"]["monitoringLocationIdentifier"].removeprefix("USGS-"))
+    return found
 
 
 def classify_site(rows, now=None):
@@ -615,28 +664,38 @@ def describe_sites(n_sites, n_reporting, counts, retired_count, draw_retired):
     return msg
 
 
-def fetch_history(site, as_of=None):
-    """Past year of daily gage heights for a site (empty if unavailable); the year ending at `as_of`.
+def fetch_histories(site_ids, as_of=None):
+    """The past year of daily gage heights per site, as {site: [ft]}, for the year ending on the date
+    of `as_of` when given and today otherwise. A site with none, or too few, is left out or empty.
 
-    Uses the daily mean. Some sites publish only a daily max and min for stage (the response then
-    lists max first, so taking the first series would silently compare against daily maxima); for
-    those the midpoint of each day's max and min stands in for the mean.
+    Uses the daily mean. Some sites publish only a daily maximum and minimum for stage; for those the
+    midpoint of each day's maximum and minimum stands in for the mean. Sites go
+    HISTORY_SITES_PER_REQUEST to a request (see fetch_csv). A failed request costs those sites their
+    past-year percentile, not the run.
     """
+    end = (as_of or datetime.now(timezone.utc)).date()
     try:
-        window = ({"startDT": (as_of - timedelta(days=365)).date().isoformat(), "endDT": as_of.date().isoformat()}
-                  if as_of else {"period": "P365D"})
-        data = get_json(f"{NWIS}/dv/", format="json", sites=site, parameterCd=GAGE_HEIGHT, **window)
-        by_stat = {ts["name"].rsplit(":", 1)[-1]:
-                   {v["dateTime"]: usable(v["value"]) for v in ts["values"][0]["value"]}
-                   for ts in data["value"]["timeSeries"]}
-    except (requests.RequestException, KeyError, IndexError, ValueError):
-        return []  # one gage's odd response must not stop the whole run
-    mean = [v for v in by_stat.get(DAILY_MEAN, {}).values() if v is not None]
+        rows = fetch_csv(DAILY_ITEMS, site_ids, HISTORY_SITES_PER_REQUEST, "monitoring_location_id,statistic_id,time,value",
+                         parameter_code=GAGE_HEIGHT, statistic_id=f"{DAILY_MAX},{DAILY_MIN},{DAILY_MEAN}",
+                         datetime=f"{(end - timedelta(days=365)).isoformat()}/{end.isoformat()}")
+    except (requests.RequestException, KeyError, ValueError):
+        return {}  # the past-year percentile is a second opinion; the map does without it
+    by_site = {}  # site -> statistic -> {date: value}
+    for row in rows:
+        value = usable(row.get("value"))
+        if value is not None and row.get("time"):
+            by_site.setdefault(site_of(row), {}).setdefault(row.get("statistic_id"), {})[row["time"]] = value
+    return {site: daily_history(by_stat) for site, by_stat in by_site.items()}
+
+
+def daily_history(by_stat):
+    """A year of daily stage from {statistic: {date: value}}: the means, or with fewer than
+    MIN_HISTORY_DAYS of them, the midpoint of each day's maximum and minimum."""
+    mean = list(by_stat.get(DAILY_MEAN, {}).values())
     if len(mean) >= MIN_HISTORY_DAYS:
         return mean
     hi, lo = by_stat.get(DAILY_MAX, {}), by_stat.get(DAILY_MIN, {})
-    return [(hi[d] + lo[d]) / 2 for d in hi
-            if d in lo and hi[d] is not None and lo[d] is not None]
+    return [(hi[d] + lo[d]) / 2 for d in hi if d in lo]
 
 
 def percentile(history, value):
@@ -896,12 +955,15 @@ def build_gages(anchor, distance_km, draw_retired=False, as_of=None, paths=None,
                         category=flood_category(stage, flood["stages"]),
                         forecast=None if as_of else fetch_forecast(flood["lid"], flood["stages"]))
         else:
-            pct = percentile(fetch_history(site, as_of), stage)
-            gage.update(method="percentile", pct=pct)
+            gage.update(method="percentile", pct=None)  # filled in below, once every gage's method is known
         return gage
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         gages = list(pool.map(build, current))
+    diamonds = [g for g in gages if g["method"] == "percentile"]
+    histories = fetch_histories([g["site"] for g in diamonds], as_of) if diamonds else {}
+    for g in diamonds:
+        g["pct"] = percentile(histories.get(g["site"], []), g["stage"])
     retired = sorted(retired, key=lambda g: -g["lat"]) if draw_retired else []
     return lines, sorted(gages, key=lambda g: -g["lat"]), retired
 

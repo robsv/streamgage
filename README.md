@@ -340,8 +340,7 @@ so on), and the link to its USGS page.
 
 "45 sites on river: 16 reporting stage; 29 not" can look as if 29 gages are broken. They are not: the count
 is every USGS location in the river's network, and most of those are not live gages. For each site that
-is not reporting stage, the script reads its USGS site catalog (what the site has ever measured, and
-when) and sorts it:
+is not reporting stage, the script reads what the site has ever measured, and when, and sorts it:
 
 | Category | What it is |
 |---|---|
@@ -356,8 +355,11 @@ when) and sorts it:
 On the Peace River, for example, 7 of the 29 are retired gages, 13 are field-visit sites (many of them
 a cluster near Bartow, measured in short studies), 5 are water-quality sites and 4 have no data. Only
 retired and offline gages can be drawn, with `--retired`: the others never had a stage record to show.
-The catalog is read for the summary line either way. If that request fails, the summary says "site
-details unavailable" and the map is unaffected.
+What each site has measured comes from the USGS series catalog, which lists every stage, flow and other
+record a site has. Field visits and water-quality samples are not in it, so they are looked up
+separately (in the USGS field measurements and samples services), and only for the sites with no stage
+or flow record: one request each for a whole river. This is read for the summary line either way. If a
+request fails, the summary says "site details unavailable" and the map is unaffected.
 
 ### The river at a past moment
 
@@ -479,11 +481,12 @@ river line + gages on the same mainstem
    v
 gages reporting stage in the last 3 days -> trend, range, peak, sparkline
    |  USGS monitoring locations: each gage's time zone -> the reading's own clock
-   |  USGS site catalog: what the sites that are NOT reporting have measured -> summary, --retired
+   |  USGS series catalog, field measurements and samples: what the sites that are NOT reporting
+   |     have measured -> summary, --retired
    |  USGS daily statistics: this calendar day over every year of record -> percentile for this date
    |  NOAA NWPS: is there an NWS gauge at the same spot?
    +--> yes: flood stages + stage forecast  -> circle
-   +--> no:  past year of daily values      -> diamond (percentile available)
+   +--> no:  past year of daily values      -> diamond (percentile available), 40 gages per request
    v
 one HTML file (Leaflet map with the data embedded)
 ```
@@ -516,7 +519,9 @@ Details worth knowing:
   gages in that batch.
 - **Yearly percentile.** It is computed against the daily mean stage. Some USGS gages publish only a
   daily maximum and minimum for stage; for those, the midpoint of each day's maximum and minimum
-  stands in for the mean.
+  stands in for the mean. The year of daily values is read for all of a river's diamonds at once, once
+  the NWS has said which gages are circles, and a failed request only costs those gages this
+  percentile.
 - **Forecast crest.** The crest is the highest point in the remaining forecast (from 6 hours ago
   onward), so a peak that has already passed is not reported as the crest. Forecasts are used only
   when the NWS reports them in feet, because the flood thresholds are in feet.
@@ -546,9 +551,10 @@ Details worth knowing:
 | USGS monitoring-locations (OGC API) | Name search for gages, drainage areas and time zones | `api.waterdata.usgs.gov/ogcapi/v1` |
 | USGS NLDI (Network Linked Data Index) | River flowlines and gages along a river | `api.water.usgs.gov/nldi` |
 | USGS continuous values (OGC API) | The last 7 days of gage height (parameter `00065`) | `api.waterdata.usgs.gov/ogcapi/v1` |
-| USGS NWIS Daily Values | Past year of daily gage height (mean, or max/min midpoint) | `waterservices.usgs.gov/nwis/dv` |
+| USGS daily values (OGC API) | Past year of daily gage height (mean, or max/min midpoint) | `api.waterdata.usgs.gov/ogcapi/v1` |
 | USGS NWIS Statistics Service | Daily statistics over every year of record: percentiles, minimum, maximum | `waterservices.usgs.gov/nwis/stat` |
-| USGS NWIS Site Service | What each site that is not reporting has measured, and when | `waterservices.usgs.gov/nwis/site` |
+| USGS series catalog and field measurements (OGC API) | What each site that is not reporting has measured, and when; a gage's primary sensor | `api.waterdata.usgs.gov/ogcapi/v1` |
+| USGS samples | Which of those sites have water-quality samples | `api.waterdata.usgs.gov/samples-data` |
 | NOAA NWPS (National Water Prediction Service) | NWS flood stages and stage forecasts | `api.water.noaa.gov/nwps/v1` |
 | Leaflet 1.9.4 | Map library, loaded from unpkg | `unpkg.com/leaflet@1.9.4` |
 | Esri and USGS tile servers | Basemap tiles | `server.arcgisonline.com`, `basemap.nationalmap.gov` |
@@ -599,9 +605,11 @@ the license.
   inside it, and the page data is embedded as JSON, so each output file is self-contained apart from
   Leaflet and the tiles. The `lint` environment is separate, so ruff is not installed for normal runs.
 - **Tests** never touch the network. `tests/fixtures` holds real responses, trimmed to a few days:
-  daily values for a site with a daily mean, one with only a daily max and min, and one with all
-  three; two days of readings for two gages; the time zones of three gages; an NWS gauge record; the site catalog for five Peace River
-  sites (retired, field-visit-only, water-quality-only, and live); and daily statistics for four gages
+  40 days of daily values for a site with a daily mean, one with only a daily max and min, and one
+  with all three; two days of readings for two gages; the time zones of three gages; the stage series
+  of four gages with a backup sensor; an NWS gauge record; the series catalog, field measurements and
+  samples for five Peace River sites (retired, field-visit-only, water-quality-only, and live); and
+  daily statistics for four gages
   (95, 53, 18 and 10 years of record, two with blank percentile columns). Everything else a test needs
   is built in the test. A router fixture (`route` in `tests/conftest.py`) replaces `get_json`, and any
   request a test did not expect fails it. The page's JavaScript logic (marker colors, trend bins, the
@@ -693,7 +701,9 @@ cause is that the Leaflet script from unpkg is blocked or unreachable.
 - **Stage-reporting gages only.** Gages that report only discharge (flow) are not shown. Many USGS
   gages do both. The summary line counts the discharge-only ones, but the map does not draw them.
 - **Retired gages are what the USGS catalog says.** Its dates are the ones USGS publishes; other
-  agencies may hold data for a site that the catalog lists as ended or empty. Field-visit,
+  agencies may hold data for a site that the catalog lists as ended or empty. The new USGS catalog
+  doesn't yet hold every old record: the Ohio River at Bellaire's daily discharge, which ended in 1958,
+  is listed with no dates and no values, so that site counts as no data and is not drawn. Field-visit,
   water-quality and empty sites are never drawn, since they have no stage record to show.
 - **Many gages in a small area.** Near some towns, several gages sit within a few hundred meters
   of each other and their markers overlap. Zoom in to separate them.

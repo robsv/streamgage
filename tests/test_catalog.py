@@ -24,16 +24,21 @@ def days_ago(n):
     return (NOW - timedelta(days=n)).date().isoformat()
 
 
-CATALOG_TEXT = (FIXTURES / "site_catalog.rdb").read_text()  # five real Peace River sites
+# five real Peace River sites: retired (Punta Gorda, Nocatee), field visits, water quality, and live (Arcadia)
+CATALOG_SITES = ["02294648", "02295977", "02296750", "02297105", "02298300"]
+
+
+def catalog_routes():
+    return {sg.TIME_SERIES: (FIXTURES / "series_catalog.csv").read_text(),
+            sg.FIELD_MEASUREMENTS: (FIXTURES / "field_measurements.csv").read_text(),
+            sg.SAMPLE_SITES: json.loads((FIXTURES / "sample_sites.json").read_text())}
 
 
 @pytest.fixture
-def catalog_rows():
-    """The recorded catalog, grouped by site number."""
-    by_site = collections.defaultdict(list)
-    for r in sg.parse_rdb(CATALOG_TEXT):
-        by_site[r["site_no"]].append(r)
-    return by_site
+def catalog_rows(route):
+    """The recorded catalog of the five sites, as fetch_catalog builds it."""
+    route(catalog_routes())
+    return collections.defaultdict(list, sg.fetch_catalog(CATALOG_SITES))
 
 
 class TestParseRdb:
@@ -66,7 +71,7 @@ class TestClassifySite:
         assert sg.classify_site(catalog_rows["02294648"], NOW) == ("field_visits", {})
 
     def test_only_water_quality_samples(self, catalog_rows):
-        assert {r["data_type_cd"] for r in catalog_rows["02295977"]} == {"qw"}
+        assert {r["data_type_cd"] for r in catalog_rows["02295977"]} == {"qw"}  # not in the series catalog at all
         assert sg.classify_site(catalog_rows["02295977"], NOW) == ("water_quality", {})
 
     def test_no_catalog_rows_at_all(self):
@@ -121,30 +126,71 @@ class TestClassifySite:
 
 
 class TestFetchCatalog:
-    def test_groups_series_by_site(self, route):
-        route({sg.SITE_SERVICE: CATALOG_TEXT})
-        catalog = sg.fetch_catalog(["02298300", "02297105"])
-        assert set(catalog) == {"02294648", "02295977", "02296750", "02297105", "02298300"}
-        assert all(r["site_no"] == site for site, rows in catalog.items() for r in rows)
+    def test_rows_take_the_legacy_catalog_shape(self, catalog_rows):
+        punta_gorda = catalog_rows["02298300"]
+        assert {"parm_cd": "00065", "data_type_cd": "dv", "begin_date": "2002-09-30",
+                "end_date": "2005-09-29"} in punta_gorda
+        assert {r["data_type_cd"] for r in catalog_rows["02297105"]} == {"uv", "dv", "other"}  # other: annual peaks
 
-    def test_asks_for_the_series_catalog_of_every_site_regardless_of_status(self, route):
-        calls = route({sg.SITE_SERVICE: CATALOG_TEXT})
-        sg.fetch_catalog(["02298300", "02297105"])
-        _, params = calls[0]
-        assert params["sites"] == "02298300,02297105"
-        assert params["seriesCatalogOutput"] == "true"
-        assert params["siteStatus"] == "all"
-        assert params["format"] == "rdb"
+    def test_a_series_with_no_dates_holds_no_data_and_is_left_out(self, catalog_rows):
+        assert "00950" in (FIXTURES / "series_catalog.csv").read_text()  # Arcadia lists one, with no dates
+        assert not any(r["parm_cd"] == "00950" for r in catalog_rows["02296750"])
+        # the ditch's only series is such an empty one, so its field visits decide what it is
+        assert {r["data_type_cd"] for r in catalog_rows["02294648"]} == {"sv"}
 
-    def test_batches_at_the_nwis_limit(self, route):
-        calls = route({sg.SITE_SERVICE: "site_no\n5s\n"})
+    def test_an_old_record_the_catalog_lists_without_dates_is_no_data(self, route):
+        # Ohio River at Bellaire: daily discharge to 1958 in the legacy catalog; the new one lists the
+        # series with no dates, and has none of its values
+        route({sg.TIME_SERIES: "monitoring_location_id,parameter_code,computation_period_identifier,begin,end\n"
+                               "USGS-03113600,00060,Daily,,\n",
+               sg.FIELD_MEASUREMENTS: "monitoring_location_id\n", sg.SAMPLE_SITES: {"features": []}})
+        assert sg.classify_site(sg.fetch_catalog(["03113600"]).get("03113600", []), NOW)[0] == "no_data"
+
+    def test_a_reservoir_with_a_lake_level_record_is_other_whatever_its_visits(self, route):
+        # Berlin Lake: a live lake-level record (62615) and field measurements
+        calls = route({sg.TIME_SERIES: "monitoring_location_id,parameter_code,computation_period_identifier,begin,end\n"
+                                       "USGS-03090000,62615,Points,2007-10-01 04:00:00+00:00,2026-11-04 04:00:00+00:00\n"})
+        assert sg.classify_site(sg.fetch_catalog(["03090000"])["03090000"], NOW)[0] == "other"
+        assert [url for url, _ in calls] == [sg.TIME_SERIES]  # no visits or samples asked about
+
+    def test_asks_for_every_series_of_every_site(self, route):
+        calls = route(catalog_routes())
+        sg.fetch_catalog(CATALOG_SITES)
+        (url, params), *_ = calls
+        assert url == sg.TIME_SERIES
+        assert params["monitoring_location_id"] == ",".join(f"USGS-{s}" for s in CATALOG_SITES)
+        assert "parameter_code" not in params
+
+    def test_visits_and_samples_are_asked_only_about_sites_with_no_continuous_record(self, route):
+        calls = route(catalog_routes())
+        sg.fetch_catalog(CATALOG_SITES)
+        asked = {url: p for url, p in calls}
+        # Punta Gorda, Nocatee and Arcadia have stage records; the ditch was visited, so only Brownville is left
+        assert asked[sg.FIELD_MEASUREMENTS]["monitoring_location_id"] == "USGS-02294648,USGS-02295977"
+        assert asked[sg.SAMPLE_SITES]["monitoringLocationIdentifier"] == [
+            "USGS-02295977"]
+
+    def test_a_catalog_of_gages_needs_no_more_requests(self, route):
+        calls = route({sg.TIME_SERIES: (FIXTURES / "series_catalog.csv").read_text()})
+        sg.fetch_catalog(["02297105", "02298300"])
+        assert [url for url, _ in calls] == [sg.TIME_SERIES]
+
+    def test_series_requests_go_in_batches(self, route):
+        calls = route({sg.TIME_SERIES: "monitoring_location_id\n", sg.FIELD_MEASUREMENTS: "monitoring_location_id\n",
+                       sg.SAMPLE_SITES: {"features": []}})
         sg.fetch_catalog([f"{i:08d}" for i in range(250)])
-        assert [len(p["sites"].split(",")) for _, p in calls] == [100, 100, 50]
+        sizes = sorted(len(p["monitoring_location_id"].split(",")) for url, p in calls if url == sg.TIME_SERIES)
+        assert sizes == [50, 100, 100]
 
     def test_no_sites_makes_no_request(self, route):
         calls = route({})
         assert sg.fetch_catalog([]) == {}
         assert calls == []
+
+    def test_a_failed_request_is_raised(self, route):
+        route({sg.TIME_SERIES: requests.ConnectionError("down")})
+        with pytest.raises(requests.ConnectionError):
+            sg.fetch_catalog(CATALOG_SITES)
 
 
 PEACE_RIVER_COUNTS = {"retired": 7, "field_visits": 13, "water_quality": 5, "no_data": 4}
@@ -198,7 +244,7 @@ def river(monkeypatch):
     monkeypatch.setattr(sg, "fetch_readings", lambda ids, as_of=None: {"A0000001": [(when, 2.0)],
                                                                        "B0000002": [(when, 3.0)]})
     monkeypatch.setattr(sg, "fetch_time_zones", lambda ids: {})
-    monkeypatch.setattr(sg, "fetch_history", lambda site, as_of=None: [])
+    monkeypatch.setattr(sg, "fetch_histories", lambda ids, as_of=None: {})
     monkeypatch.setattr(sg, "fetch_nws", lambda *a: None)
     monkeypatch.setattr(sg, "fetch_daily_stats", lambda dates: {})
     monkeypatch.setattr(sg, "get_json", lambda url, **p: {"gauges": []})
