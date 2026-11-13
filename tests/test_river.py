@@ -371,7 +371,7 @@ class TestFetchReadings:
         assert sizes == [100, 100, 50] and sg.READINGS_SITES_PER_REQUEST == 100
 
     def test_a_batch_that_fills_a_page_is_split_and_asked_again(self, route, monkeypatch):
-        monkeypatch.setattr(sg, "READINGS_PAGE", 3)
+        monkeypatch.setattr(sg, "PAGE_ROWS", 3)
 
         def one_reading_per_site(params):
             ids = [s.removeprefix("USGS-") for s in params["monitoring_location_id"].split(",")]

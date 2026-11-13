@@ -84,16 +84,14 @@ class TestRequestsForAPastMoment:
             "02296750": (9.5, two_days_before)}
 
     def test_the_year_of_daily_values_ends_on_the_moments_date(self, route, fixture):
-        calls = route({"/dv/": fixture("dv_mean_only.json")})
-        sg.fetch_history("02294161", MOMENT)
-        _, params = calls[0]
-        assert params["startDT"] == "2025-11-03" and params["endDT"] == "2026-11-03"
-        assert "period" not in params
+        calls = route({sg.DAILY_ITEMS: fixture("daily_three_gages.csv")})
+        sg.fetch_histories(["02294161"], MOMENT)
+        assert calls[0][1]["datetime"] == "2025-11-03/2026-11-03"
 
-    def test_the_year_of_daily_values_is_still_a_period_without_a_moment(self, route, fixture):
-        calls = route({"/dv/": fixture("dv_mean_only.json")})
-        sg.fetch_history("02294161")
-        assert calls[0][1]["period"] == "P365D" and "startDT" not in calls[0][1]
+    def test_the_moments_own_date_is_used_not_the_utc_one(self, route, fixture):
+        calls = route({sg.DAILY_ITEMS: fixture("daily_three_gages.csv")})
+        sg.fetch_histories(["02294161"], datetime(2026, 11, 3, 22, 0, tzinfo=EST))  # 3 a.m. on the 4th in UTC
+        assert calls[0][1]["datetime"].endswith("/2026-11-03")
 
 
 @pytest.fixture
@@ -111,8 +109,8 @@ def river(monkeypatch):
         return {"02296750": readings(16.0, end, slope=0.05), "02294898": readings(74.5, end, slope=0.05)}
     monkeypatch.setattr(sg, "fetch_readings", fetch_readings)
     monkeypatch.setattr(sg, "fetch_time_zones", lambda ids: {site: ("EST", True) for site in ids})
-    monkeypatch.setattr(sg, "fetch_history",
-                        lambda site, as_of=None: asked["history"].append(as_of) or [float(i) for i in range(40)])
+    monkeypatch.setattr(sg, "fetch_histories", lambda ids, as_of=None: asked["history"].append((list(ids), as_of))
+                        or {site: [float(i) for i in range(40)] for site in ids})
     monkeypatch.setattr(sg, "fetch_nws", lambda site, lat, lon, gauges: (
         {"lid": "ARCF1", "stages": {"action": 9, "minor": 11, "moderate": 14, "major": 16}}
         if site == "02296750" else None))
@@ -129,11 +127,11 @@ class TestBuildGagesAsOf:
     def test_the_moment_reaches_every_fetch(self, river):
         sg.build_gages("anchor", 322, as_of=MOMENT)
         assert river["readings"] == [MOMENT]  # one batched request for every gage's readings
-        assert river["history"] == [MOMENT]  # only the one diamond needs a year of history
+        assert river["history"] == [(["02294898"], MOMENT)]  # only the one diamond needs a year of history
 
     def test_without_a_moment_nothing_is_dated(self, river):
         sg.build_gages("anchor", 322)
-        assert river["readings"] == [None] and set(river["history"]) == {None}
+        assert river["readings"] == [None] and river["history"] == [(["02294898"], None)]
 
     def test_there_are_no_forecasts_for_a_past_moment(self, river):
         gages = {g["site"]: g for g in sg.build_gages("anchor", 322, as_of=MOMENT)[1]}

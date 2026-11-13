@@ -254,7 +254,7 @@ class TestBuildGagesWithStatistics:
             "02299999": [(at("2026-11-05T12:00:00-05:00"), 3.0)]})
         monkeypatch.setattr(sg, "fetch_time_zones", lambda ids: {site: ("EST", True) for site in ids})
         monkeypatch.setattr(sg, "STALE_AFTER", timedelta(days=36500))  # count these old readings as current
-        monkeypatch.setattr(sg, "fetch_history", lambda site, as_of=None: [])
+        monkeypatch.setattr(sg, "fetch_histories", lambda ids, as_of=None: {})
         monkeypatch.setattr(sg, "fetch_catalog", lambda ids: {})
         monkeypatch.setattr(sg, "fetch_nws", lambda site, lat, lon, gauges: (
             {"lid": "ARCF1", "stages": {"major": 16}} if site == "02296750" else None))

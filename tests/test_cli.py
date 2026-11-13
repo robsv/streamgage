@@ -34,7 +34,8 @@ def river(monkeypatch, route):
         {"lid": "ARCF1", "stages": STAGES} if site == "02296750" else None))
     monkeypatch.setattr(sg, "fetch_forecast", lambda lid, stages: {
         "issued": "x", "series": [], "crest": 16.5, "crest_time": "t", "crest_category": "major"})
-    monkeypatch.setattr(sg, "fetch_history", lambda site, as_of=None: [float(i) / 10 for i in range(40)])
+    monkeypatch.setattr(sg, "fetch_histories", lambda ids, as_of=None: {site: [float(i) / 10 for i in range(40)]
+                                                                         for site in ids})
     monkeypatch.setattr(sg, "fetch_catalog", lambda ids: {})
     monkeypatch.setattr(sg, "fetch_daily_stats", lambda dates: {})
     return route({sg.NWPS: {"gauges": [{"lid": "ARCF1"}]}})
@@ -133,7 +134,7 @@ class TestBuildGages:
         assert {g["method"] for g in gages} == {"nws", "percentile"}
 
     def test_a_short_history_gives_no_percentile_but_still_a_gage(self, river, monkeypatch):
-        monkeypatch.setattr(sg, "fetch_history", lambda site, as_of=None: [1.0] * 5)
+        monkeypatch.setattr(sg, "fetch_histories", lambda ids, as_of=None: {site: [1.0] * 5 for site in ids})
         platt = next(g for g in sg.build_gages("02298300", 322)[1] if g["site"] == "02297345")
         assert platt["pct"] is None
 
