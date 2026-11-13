@@ -1,0 +1,137 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "id": "07959802c1044ff7a87644bd2257465e",
+   "properties": {
+    "id": "07959802c1044ff7a87644bd2257465e",
+    "primary": null,
+    "web_description": null,
+    "monitoring_location_id": "USGS-03085152",
+    "computation_period_identifier": "Daily"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "09441650ff1f47d68e37febc4f414ea8",
+   "properties": {
+    "id": "09441650ff1f47d68e37febc4f414ea8",
+    "primary": null,
+    "web_description": "Auxillary Stage",
+    "monitoring_location_id": "USGS-03077500",
+    "computation_period_identifier": "Points"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "0aa2529d5cdd4157be802289961cb68d",
+   "properties": {
+    "id": "0aa2529d5cdd4157be802289961cb68d",
+    "primary": null,
+    "web_description": "Backup",
+    "monitoring_location_id": "USGS-03085152",
+    "computation_period_identifier": "Points"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "0f28e254c7124e918bfaafea26f787aa",
+   "properties": {
+    "id": "0f28e254c7124e918bfaafea26f787aa",
+    "primary": "Primary",
+    "web_description": null,
+    "monitoring_location_id": "USGS-03085152",
+    "computation_period_identifier": "Points"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "10d2467a098741b69c0dc4e95a8bf468",
+   "properties": {
+    "id": "10d2467a098741b69c0dc4e95a8bf468",
+    "primary": "Primary",
+    "web_description": "Primary",
+    "monitoring_location_id": "USGS-03077500",
+    "computation_period_identifier": "Points"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "21f192e045344e1ba3bff1b8350ce213",
+   "properties": {
+    "id": "21f192e045344e1ba3bff1b8350ce213",
+    "primary": null,
+    "web_description": "submersible transducer",
+    "monitoring_location_id": "USGS-03090500",
+    "computation_period_identifier": "Points"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "2f9302d7659341edaf2fbc54ae6848de",
+   "properties": {
+    "id": "2f9302d7659341edaf2fbc54ae6848de",
+    "primary": null,
+    "web_description": "Backup",
+    "monitoring_location_id": "USGS-03107500",
+    "computation_period_identifier": "Points"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "3b2557fce4cd4bdf870babf3161deb51",
+   "properties": {
+    "id": "3b2557fce4cd4bdf870babf3161deb51",
+    "primary": "Primary",
+    "web_description": null,
+    "monitoring_location_id": "USGS-03107500",
+    "computation_period_identifier": "Water Year"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "65a2cab79ff14afba606e8410fdd3c1a",
+   "properties": {
+    "id": "65a2cab79ff14afba606e8410fdd3c1a",
+    "primary": "Primary",
+    "web_description": null,
+    "monitoring_location_id": "USGS-03090500",
+    "computation_period_identifier": "Water Year"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "9fb365fb3dcd4decac2c96a613ab08b9",
+   "properties": {
+    "id": "9fb365fb3dcd4decac2c96a613ab08b9",
+    "primary": "Primary",
+    "web_description": null,
+    "monitoring_location_id": "USGS-03107500",
+    "computation_period_identifier": "Points"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "af0d5349350f4334bdb31b9ba3d13d7c",
+   "properties": {
+    "id": "af0d5349350f4334bdb31b9ba3d13d7c",
+    "primary": "Primary",
+    "web_description": null,
+    "monitoring_location_id": "USGS-03077500",
+    "computation_period_identifier": "Water Year"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "ed44dd5f0da047f1bb4e46a472bcc926",
+   "properties": {
+    "id": "ed44dd5f0da047f1bb4e46a472bcc926",
+    "primary": null,
+    "web_description": null,
+    "monitoring_location_id": "USGS-03090500",
+    "computation_period_identifier": "Points"
+   }
+  }
+ ]
+}

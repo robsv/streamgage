@@ -3,7 +3,6 @@
 from datetime import datetime, timezone
 
 import pytest
-import requests
 
 import streamgage as sg
 
@@ -182,56 +181,3 @@ class TestRecentStatsSeries:
     def test_series_is_much_smaller_than_the_raw_readings(self):
         pts = line(168, 0.01)  # a full week at 15 minutes
         assert len(sg.recent_stats(pts, now=NOW)["series"]) < len(pts) / 3
-
-
-class TestFetchRecent:
-    def test_parses_the_recorded_response(self, route, fixture):
-        calls = route({"/iv/": fixture("iv_two_days.json")})
-        pts = sg.fetch_recent("02297345")
-        raw = fixture("iv_two_days.json")["value"]["timeSeries"][0]["values"][0]["value"]
-        assert len(pts) == len([v for v in raw if float(v["value"]) > -999])
-        assert pts == sorted(pts)
-        first = datetime.fromisoformat(raw[0]["dateTime"]).timestamp()
-        assert pts[0][0] == first  # offsets are honored, not read as local time
-        assert all(isinstance(t, float) and isinstance(v, float) for t, v in pts)
-        _, params = calls[0]
-        assert params["sites"] == "02297345"
-        assert params["parameterCd"] == "00065"
-        assert params["period"] == "P7D"
-
-    def test_drops_no_data_sentinels(self, route, fixture):
-        data = fixture("iv_two_days.json")
-        values = data["value"]["timeSeries"][0]["values"][0]["value"]
-        values[3]["value"] = "-999999"
-        route({"/iv/": data})
-        assert len(sg.fetch_recent("02297345")) == len(values) - 1
-
-    def test_unsorted_response_is_sorted(self, route, fixture):
-        data = fixture("iv_two_days.json")
-        data["value"]["timeSeries"][0]["values"][0]["value"].reverse()
-        route({"/iv/": data})
-        pts = sg.fetch_recent("02297345")
-        assert pts == sorted(pts)
-
-    def test_no_series(self, route):
-        route({"/iv/": {"value": {"timeSeries": []}}})
-        assert sg.fetch_recent("02297345") == []
-
-    def test_request_failure(self, route):
-        route({"/iv/": requests.ConnectionError("down")})
-        assert sg.fetch_recent("02297345") == []
-
-    def test_http_error(self, route):
-        route({"/iv/": requests.HTTPError("503")})
-        assert sg.fetch_recent("02297345") == []
-
-    @pytest.mark.parametrize("body", [{}, {"value": {}}, {"value": {"timeSeries": [{}]}}])
-    def test_malformed_response_does_not_raise(self, route, body):
-        route({"/iv/": body})
-        assert sg.fetch_recent("02297345") == []
-
-    def test_bad_timestamp_does_not_raise(self, route):
-        body = {"value": {"timeSeries": [{"values": [{"value": [
-            {"value": "1.0", "dateTime": "not a time"}]}]}]}}
-        route({"/iv/": body})
-        assert sg.fetch_recent("02297345") == []

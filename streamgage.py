@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Draw an interactive map of a river with USGS gages colored by current stage.
 
-Data sources (all public, no API key):
+Data sources (all public; no API key needed, though one raises a USGS rate limit):
   * USGS NLDI           - river flowlines and gages along the main stem
-  * USGS Water Services - current gage height (00065) and 365 days of daily values
+  * USGS Water Data API - the last 7 days of gage height (00065) readings, gage time zones
+  * USGS Water Services - 365 days of daily values, daily statistics, the site catalog
   * NOAA NWPS           - NWS flood categories (action/minor/moderate/major)
 
 Gages with NWS flood stages are colored by flood category (circles). Gages
@@ -23,10 +24,13 @@ Examples:
 """
 
 import argparse
+import csv
 import hashlib
 import html
+import io
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -61,7 +65,16 @@ PARAM_NAMES = {GAGE_HEIGHT: "stage", "00060": "discharge", "00010": "water tempe
 CATEGORY_LABELS = (("discharge_only", "discharge only"), ("offline", "offline"), ("retired", "retired"),
                    ("field_visits", "field visits only"), ("water_quality", "water quality only"),
                    ("other", "other data only"), ("no_data", "no data"))
-MONITORING = "https://api.waterdata.usgs.gov/ogcapi/v1/collections/monitoring-locations/items"
+WATERDATA = "https://api.waterdata.usgs.gov/"  # the USGS Water Data API, the only service a key is sent to
+API_KEY_VARIABLE = "WATERDATA_API_KEY"  # an optional free key for it, which raises its hourly limit
+OGCAPI = f"{WATERDATA}ogcapi/v1/collections"
+MONITORING = f"{OGCAPI}/monitoring-locations/items"
+CONTINUOUS_ITEMS = f"{OGCAPI}/continuous/items"  # readings from the gages' sensors, every 15 minutes at most gages
+TIME_SERIES = f"{OGCAPI}/time-series-metadata/items"  # what each series is, such as a gage's primary or backup sensor
+READINGS_SITES_PER_REQUEST = 100  # most sites on a river have no readings; a batch that overflows a page is split
+READINGS_PAGE = 50000  # the most rows the API returns at once; a full page may have been cut short
+# hours from UTC of the standard time in each time zone USGS names for a gage
+ZONE_OFFSETS = {"AST": -4, "EST": -5, "CST": -6, "MST": -7, "PST": -8, "AKST": -9, "HST": -10}
 NO_DATA = -999  # NWIS/NWPS report missing values as -999, -9999 or -999999
 MAX_SITES_PER_REQUEST = 100  # NWIS limit
 STALE_AFTER = timedelta(days=3)  # ignore gages whose latest stage reading is older than this
@@ -96,8 +109,12 @@ def get(url, params):
     A service that asks for more than MAX_RETRY_AFTER seconds (the USGS does, once its hourly limit is
     used up: about 12 minutes) is not retried, since the retries would all fail. The error says how long
     to wait instead."""
+    headers = api_headers(url)
     for delay in (*RETRY_DELAYS, None):
-        r = session.get(url, params=params, timeout=60)
+        r = session.get(url, params=params, timeout=60, headers=headers)
+        if r.status_code == 403 and headers:
+            raise requests.HTTPError(f"403 from {url.split('?')[0]}: the USGS refused the key in {API_KEY_VARIABLE}; "
+                                     "check it, or unset the variable to run without one", response=r)
         if r.status_code not in RETRY_STATUSES or delay is None:
             r.raise_for_status()
             return r
@@ -112,6 +129,14 @@ def get(url, params):
         wait = max(delay, asked)
         print(f"  {r.status_code} from {url.split('?')[0]}; retrying in {wait:g} s", file=sys.stderr)
         time.sleep(wait)
+
+
+def api_headers(url):
+    """The X-Api-Key header for a request to the USGS Water Data API when WATERDATA_API_KEY is set, and
+    None otherwise. The key is sent to no other service, and it travels in a header rather than the URL
+    so that error messages, which quote the URL, never show it."""
+    key = os.environ.get(API_KEY_VARIABLE, "").strip()
+    return {"X-Api-Key": key} if key and url.startswith(WATERDATA) else None
 
 
 def is_refusal(err):
@@ -350,32 +375,138 @@ def usable(value):
     return None if v <= NO_DATA or not math.isfinite(v) else v
 
 
-def fetch_current(site_ids, as_of=None):
-    """Latest gage height per site; only sites reporting recent stage are returned.
+def fetch_readings(site_ids, as_of=None):
+    """The last RECENT_DAYS of gage-height readings per site, as {site: [(epoch seconds, ft)]}, oldest
+    first. The days end at `as_of` (an aware datetime) when given, and now otherwise. Sites with no
+    usable reading in those days are left out.
 
-    With `as_of` (an aware datetime), the latest reading at or before that moment, and "recent" is
-    judged against it. Sites then are not limited to those active today.
+    Sites go READINGS_SITES_PER_REQUEST to a request, and the requests run in parallel. The CSV
+    response gives no sign that rows were cut off, so a batch that fills a whole page is split in two
+    and asked again. A site with more than one gage-height series (a backup sensor, say) keeps the one
+    series_rank puts first. A failed request is raised: without readings there is no map to draw.
     """
+    end = as_of or datetime.now(timezone.utc)
+    window = (f"{(end - timedelta(days=RECENT_DAYS)).isoformat(timespec='minutes')}/"
+              f"{end.isoformat(timespec='minutes')}")
+
+    def fetch(batch):
+        text = get_text(CONTINUOUS_ITEMS, f="csv", skipGeometry="true", limit=READINGS_PAGE,
+                        monitoring_location_id=",".join(f"USGS-{site}" for site in batch),
+                        parameter_code=GAGE_HEIGHT, datetime=window,
+                        properties="monitoring_location_id,time_series_id,time,value")
+        rows = list(csv.DictReader(io.StringIO(text)))
+        if len(rows) >= READINGS_PAGE and len(batch) > 1:
+            half = len(batch) // 2
+            return fetch(batch[:half]) + fetch(batch[half:])
+        return rows
+
+    batches = [site_ids[i:i + READINGS_SITES_PER_REQUEST]
+               for i in range(0, len(site_ids), READINGS_SITES_PER_REQUEST)]
+    series = {}  # (site, series id) -> [(epoch seconds, ft)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for rows in pool.map(fetch, batches):
+            for row in rows:
+                stage = usable(row.get("value"))
+                try:
+                    when = datetime.fromisoformat(row["time"]).timestamp()
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if stage is not None:
+                    site = row["monitoring_location_id"].removeprefix("USGS-")
+                    series.setdefault((site, row.get("time_series_id")), []).append((when, stage))
+    for pts in series.values():
+        pts.sort()
+    by_site = {}
+    for site, ts in series:
+        by_site.setdefault(site, []).append(ts)
+    shared = sorted(site for site, ids in by_site.items() if len(ids) > 1)
+    kinds = fetch_series_kinds(shared) if shared else {}
     out = {}
-    cutoff = (as_of or datetime.now(timezone.utc)) - STALE_AFTER
-    if as_of:
-        when = {"startDT": cutoff.isoformat(timespec="minutes"), "endDT": as_of.isoformat(timespec="minutes")}
-    else:
-        when = {"siteStatus": "active"}
-    for i in range(0, len(site_ids), MAX_SITES_PER_REQUEST):
-        chunk = site_ids[i:i + MAX_SITES_PER_REQUEST]
-        data = get_json(f"{NWIS}/iv/", format="json", sites=",".join(chunk),
-                        parameterCd=GAGE_HEIGHT, **when)
-        for ts in data["value"]["timeSeries"]:
-            vals = ts["values"][0]["value"]
-            if not vals:
-                continue
-            v = vals[-1]
-            stage = usable(v["value"])
-            if stage is None or datetime.fromisoformat(v["dateTime"]) < cutoff:
-                continue
-            out[ts["sourceInfo"]["siteCode"][0]["value"]] = (stage, v["dateTime"])
+    for site, ids in by_site.items():
+        best = max(ids, key=lambda ts, site=site: series_rank(series[site, ts], kinds.get(ts)))
+        out[site] = series[site, best]
     return out
+
+
+def fetch_series_kinds(site_ids):
+    """{series id: (primary, description)} for the gage-height series at these sites, from the USGS
+    series catalog. A failed request gives {}, and series_rank then goes by the readings alone."""
+    kinds = {}
+    try:
+        for i in range(0, len(site_ids), MAX_SITES_PER_REQUEST):
+            batch = site_ids[i:i + MAX_SITES_PER_REQUEST]
+            for f in get_json(TIME_SERIES, f="json", skipGeometry="true", limit=1000, parameter_code=GAGE_HEIGHT,
+                              monitoring_location_id=",".join(f"USGS-{site}" for site in batch),
+                              properties="id,primary,web_description")["features"]:
+                p = f["properties"]
+                kinds[p["id"]] = (p.get("primary") == "Primary", p.get("web_description"))
+    except (requests.RequestException, KeyError, TypeError, ValueError):
+        return {}
+    return kinds
+
+
+def series_rank(pts, kind=None):
+    """How to choose among one site's gage-height series: the primary one first, then one with no
+    description (a backup or auxiliary sensor is labeled as one), then the newest and longest record."""
+    primary, description = kind or (False, "unknown")
+    return primary, not description, pts[-1][0], len(pts)
+
+
+def latest_readings(readings, as_of=None):
+    """{site: (stage, epoch seconds)} of the newest reading at each site whose newest reading is no
+    older than STALE_AFTER, judged against `as_of` when given and now otherwise."""
+    cutoff = ((as_of or datetime.now(timezone.utc)) - STALE_AFTER).timestamp()
+    return {site: (pts[-1][1], pts[-1][0]) for site, pts in readings.items() if pts and pts[-1][0] >= cutoff}
+
+
+def fetch_time_zones(site_ids):
+    """{site: (zone abbreviation, uses daylight saving time)} from the USGS location records, such as
+    ("EST", True). A failed request gives {}, and those gages' times are then given in UTC."""
+    zones = {}
+    try:
+        for i in range(0, len(site_ids), MAX_SITES_PER_REQUEST):
+            batch = site_ids[i:i + MAX_SITES_PER_REQUEST]
+            quoted = ",".join(f"'{site}'" for site in batch)
+            for f in get_json(MONITORING, f="json", skipGeometry="true", limit=len(batch) + 1,
+                              filter=f"monitoring_location_number IN ({quoted})", **{"filter-lang": "cql-text"},
+                              properties="monitoring_location_number,time_zone_abbreviation,uses_daylight_savings",
+                              )["features"]:
+                p = f["properties"]
+                zones[p["monitoring_location_number"]] = (p.get("time_zone_abbreviation"),
+                                                          p.get("uses_daylight_savings") == "Y")
+    except (requests.RequestException, KeyError, TypeError, ValueError):
+        return {}  # the times are still right, only shown in UTC
+    return zones
+
+
+def nth_sunday(year, month, n, tz):
+    """Midnight at the start of the nth Sunday of a month, in time zone `tz`."""
+    first = datetime(year, month, 1, tzinfo=tz)
+    return first + timedelta(days=(6 - first.weekday()) % 7, weeks=n - 1)
+
+
+def local_time(epoch, zone=None):
+    """An instant (epoch seconds) as an ISO 8601 time on the gage's own clock, such as
+    2026-11-05T12:30:00-05:00, from its time zone (see fetch_time_zones). The calendar day of a reading
+    is read from this. A zone this tool doesn't know, or none, gives the time in UTC.
+
+    Daylight saving time follows the US rules in force since 2007: from 2 a.m. on the second Sunday in
+    March to 2 a.m. on the first Sunday in November. The API's readings start in October 2007.
+    """
+    utc = datetime.fromtimestamp(epoch, timezone.utc)
+    abbreviation, daylight = zone or (None, False)
+    if abbreviation not in ZONE_OFFSETS:
+        return utc.isoformat()
+    offset = timedelta(hours=ZONE_OFFSETS[abbreviation])
+    standard = utc.astimezone(timezone(offset))
+    if daylight:
+        # both changes happen at 2 a.m. on the clock: 2 a.m. standard time in March, and 2 a.m.
+        # daylight time, which is 1 a.m. standard time, in November
+        starts = nth_sunday(standard.year, 3, 2, standard.tzinfo) + timedelta(hours=2)
+        ends = nth_sunday(standard.year, 11, 1, standard.tzinfo) + timedelta(hours=1)
+        if starts <= standard < ends:
+            return utc.astimezone(timezone(offset + timedelta(hours=1))).isoformat()
+    return standard.isoformat()
 
 
 def parse_as_of(text, now=None):
@@ -512,27 +643,6 @@ def percentile(history, value):
     if len(history) < MIN_HISTORY_DAYS:
         return None
     return 100 * sum(h <= value for h in history) / len(history)
-
-
-def fetch_recent(site, as_of=None):
-    """Last RECENT_DAYS of instantaneous gage heights as [(epoch seconds, ft)] (empty if unavailable);
-    the days ending at `as_of` when given."""
-    try:
-        window = ({"startDT": (as_of - timedelta(days=RECENT_DAYS)).isoformat(timespec="minutes"),
-                   "endDT": as_of.isoformat(timespec="minutes")}
-                  if as_of else {"period": f"P{RECENT_DAYS}D"})
-        data = get_json(f"{NWIS}/iv/", format="json", sites=site, parameterCd=GAGE_HEIGHT, **window)
-        series = data["value"]["timeSeries"]
-        if not series:
-            return []
-        pts = []
-        for v in series[0]["values"][0]["value"]:
-            val = usable(v["value"])
-            if val is not None:
-                pts.append((datetime.fromisoformat(v["dateTime"]).timestamp(), val))
-        return sorted(pts)
-    except (requests.RequestException, KeyError, IndexError, ValueError):
-        return []  # one gage's odd response must not stop the whole run
 
 
 def slope_per_hour(pts):
@@ -727,7 +837,10 @@ def build_gages(anchor, distance_km, draw_retired=False, as_of=None, paths=None,
     """
     extra = {k: v for k, v in (("paths", paths), ("comids", comids)) if v is not None}
     lines, sites = fetch_river(anchor, distance_km, **extra)
-    current = fetch_current(list(sites), as_of)
+    readings = fetch_readings(list(sites), as_of)
+    latest = latest_readings(readings, as_of)
+    zones = fetch_time_zones(list(latest)) if latest else {}
+    current = {site: (stage, local_time(when, zones.get(site))) for site, (stage, when) in latest.items()}
     not_reporting = [s for s in sites if s not in current]
     counts, retired = None, []
     if not_reporting:
@@ -775,7 +888,7 @@ def build_gages(anchor, distance_km, draw_retired=False, as_of=None, paths=None,
         stage, when = current[site]
         gage = {"site": site, "name": pretty_name(name), "lat": lat,
                 "lon": lon, "stage": stage, "time": when,
-                "recent": recent_stats(fetch_recent(site, as_of), now=as_of.timestamp() if as_of else None),
+                "recent": recent_stats(readings[site], now=as_of.timestamp() if as_of else None),
                 "longterm": long_term(stage, stats[site]) if site in stats else None}
         flood = fetch_nws(site, lat, lon, nws)
         if flood:

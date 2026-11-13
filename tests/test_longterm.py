@@ -1,5 +1,7 @@
 """The percentile for this calendar date over every year of record (USGS daily statistics)."""
 
+from datetime import datetime, timedelta
+
 import pytest
 import requests
 
@@ -244,11 +246,14 @@ class TestBuildGagesWithStatistics:
                  "02294898": ("PEACE RIVER AT FORT MEADE FL", 27.75, -81.78),
                  "02299999": ("PEACE RIVER NO STATISTICS FL", 27.0, -82.0)}
         monkeypatch.setattr(sg, "fetch_river", lambda anchor, km: ([], sites))
-        monkeypatch.setattr(sg, "fetch_current", lambda ids, as_of=None: {
-            "02296750": (16.15, "2026-11-05T12:30:00.000-05:00"),   # above the record for Nov 5
-            "02294898": (74.48, "2026-11-05T23:45:00.000-05:00"),   # still Nov 5 on its own clock
-            "02299999": (3.0, "2026-11-05T12:00:00.000-05:00")})
-        monkeypatch.setattr(sg, "fetch_recent", lambda site, as_of=None: [])
+        def at(text):
+            return datetime.fromisoformat(text).timestamp()
+        monkeypatch.setattr(sg, "fetch_readings", lambda ids, as_of=None: {
+            "02296750": [(at("2026-11-05T12:30:00-05:00"), 16.15)],   # above the record for Nov 5
+            "02294898": [(at("2026-11-05T23:45:00-05:00"), 74.48)],   # still Nov 5 on its own clock
+            "02299999": [(at("2026-11-05T12:00:00-05:00"), 3.0)]})
+        monkeypatch.setattr(sg, "fetch_time_zones", lambda ids: {site: ("EST", True) for site in ids})
+        monkeypatch.setattr(sg, "STALE_AFTER", timedelta(days=36500))  # count these old readings as current
         monkeypatch.setattr(sg, "fetch_history", lambda site, as_of=None: [])
         monkeypatch.setattr(sg, "fetch_catalog", lambda ids: {})
         monkeypatch.setattr(sg, "fetch_nws", lambda site, lat, lon, gauges: (

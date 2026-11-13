@@ -1,0 +1,32 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "id": "USGS-02296750",
+   "properties": {
+    "monitoring_location_number": "02296750",
+    "time_zone_abbreviation": "EST",
+    "uses_daylight_savings": "Y"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "USGS-02297345",
+   "properties": {
+    "monitoring_location_number": "02297345",
+    "time_zone_abbreviation": "EST",
+    "uses_daylight_savings": "Y"
+   }
+  },
+  {
+   "type": "Feature",
+   "id": "USGS-09380000",
+   "properties": {
+    "monitoring_location_number": "09380000",
+    "time_zone_abbreviation": "MST",
+    "uses_daylight_savings": "N"
+   }
+  }
+ ]
+}

@@ -1,10 +1,11 @@
 """Shared test helpers. No test makes a network request.
 
-The JSON files in tests/fixtures are real USGS and NWS responses, trimmed to a few days so they
+The files in tests/fixtures are real USGS and NWS responses, trimmed to a few days so they
 stay small. Everything else is built in the tests themselves.
 """
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -16,9 +17,10 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 @pytest.fixture
 def fixture():
-    """Load a recorded response from tests/fixtures by file name."""
+    """Load a recorded response from tests/fixtures by file name: parsed if JSON, as text otherwise."""
     def load(name):
-        return json.loads((FIXTURES / name).read_text())
+        text = (FIXTURES / name).read_text()
+        return json.loads(text) if name.endswith(".json") else text
     return load
 
 
@@ -107,3 +109,20 @@ def retired_gage(site="02298300", name="Peace River At Punta Gorda FL", **overri
             "params": ["specific conductance", "stage", "water temperature"]}
     base.update(overrides)
     return base
+
+
+def readings(stage, end=None, hours=48, slope=0.0):
+    """Readings every 15 minutes for `hours` hours, as [(epoch seconds, ft)], rising `slope` ft/h to
+    `stage` at `end` (epoch seconds; now by default)."""
+    end = datetime.now(timezone.utc).timestamp() if end is None else end
+    n = hours * 4
+    return [(end - (n - i) * 900, stage - slope * (n - i) / 4) for i in range(n + 1)]
+
+
+def continuous_csv(*rows):
+    """A continuous-values CSV response from (site, [(time, value), ...]) pairs, or (site, readings,
+    series id) for a site with more than one series. Times are strings as the API writes them."""
+    lines = ["x,y,monitoring_location_id,time_series_id,time,value"]
+    for site, values, *series in rows:
+        lines += [f",,USGS-{site},{series[0] if series else 'ts-' + site},{t},{v}" for t, v in values]
+    return "\n".join(lines) + "\n"

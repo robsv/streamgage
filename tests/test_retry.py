@@ -26,7 +26,8 @@ def served(monkeypatch):
     """Make session.get return the given replies in order; returns (calls, sleeps)."""
     def install(*replies):
         calls, sleeps, queue = [], [], list(replies)
-        monkeypatch.setattr(sg.session, "get", lambda url, params, timeout: calls.append(url) or queue.pop(0))
+        monkeypatch.setattr(sg.session, "get",
+                            lambda url, params, timeout, headers=None: calls.append(url) or queue.pop(0))
         monkeypatch.setattr(sg.time, "sleep", sleeps.append)
         return calls, sleeps
     return install
@@ -74,3 +75,53 @@ def test_other_errors_are_raised_at_once(served, status):
     with pytest.raises(sg.requests.HTTPError):
         sg.get_json("https://x/y")
     assert len(calls) == 1 and sleeps == []
+
+
+class TestApiKey:
+    URL = f"{sg.OGCAPI}/continuous/items"
+
+    @pytest.fixture
+    def sent(self, monkeypatch):
+        """Make session.get answer 200 (or a given status) and record the headers of each request."""
+        def install(status=200):
+            seen = []
+            monkeypatch.setattr(sg.session, "get", lambda url, params, timeout, headers=None: (
+                seen.append(headers) or Reply(status, {"ok": 1})))
+            return seen
+        return install
+
+    def test_the_key_goes_to_the_water_data_api_in_a_header(self, sent, monkeypatch):
+        monkeypatch.setenv(sg.API_KEY_VARIABLE, "  abc123  ")
+        headers = sent()
+        sg.get_json(self.URL, f="json")
+        assert headers == [{"X-Api-Key": "abc123"}]
+
+    @pytest.mark.parametrize("url", [sg.NWPS, f"{sg.NWIS}/dv/", sg.NLDI])
+    def test_no_other_service_is_sent_the_key(self, sent, monkeypatch, url):
+        monkeypatch.setenv(sg.API_KEY_VARIABLE, "abc123")
+        headers = sent()
+        sg.get_json(url)
+        assert headers == [None]
+
+    @pytest.mark.parametrize("value", [None, "", "   "])
+    def test_without_a_key_no_header_is_sent(self, sent, monkeypatch, value):
+        if value is None:
+            monkeypatch.delenv(sg.API_KEY_VARIABLE, raising=False)
+        else:
+            monkeypatch.setenv(sg.API_KEY_VARIABLE, value)
+        headers = sent()
+        sg.get_json(self.URL)
+        assert headers == [None]
+
+    def test_a_refused_key_says_which_variable_to_check_and_never_shows_the_key(self, sent, monkeypatch):
+        monkeypatch.setenv(sg.API_KEY_VARIABLE, "abc123")
+        sent(403)
+        with pytest.raises(sg.requests.HTTPError, match=sg.API_KEY_VARIABLE) as exc:
+            sg.get_json(self.URL)
+        assert "abc123" not in str(exc.value)
+
+    def test_a_403_without_a_key_is_an_ordinary_error(self, sent, monkeypatch):
+        monkeypatch.delenv(sg.API_KEY_VARIABLE, raising=False)
+        sent(403)
+        with pytest.raises(sg.requests.HTTPError, match="403 error"):
+            sg.get_json(self.URL)
