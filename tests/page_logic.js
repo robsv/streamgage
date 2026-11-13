@@ -57,11 +57,24 @@ equal(color({method: "percentile"}), NODATA, "a gage without the field is no dat
 equal(dateValue(longterm("above", 100)), 101, "above the record is binned past 100");
 equal(dateValue(longterm("within", 100)), 100, "the record value is binned as 100");
 
+// the flow percentile for this date: the same bins, from the flow's own statistics
+const flowGage = (status, pct, stagePct = 50) =>
+  ({method: "percentile", longterm: {status: "within", pct: stagePct}, flow: 1000, flow_longterm: {status, pct}});
+mode = "flow";
+equal(color(flowGage("within", 50, 2)), DATE_BINS[2][1], "flow mode colors by the flow percentile, not the stage's");
+equal(color(flowGage("within", 96)), DATE_BINS[4][1], "96th flow percentile: 95th up to the record");
+equal(color(flowGage("above", 100)), DATE_BINS[5][1], "a flow above the record is magenta");
+equal(color({method: "percentile", longterm: {status: "within", pct: 50}, flow: 1000, flow_longterm: null}), NODATA,
+      "a flow without statistics is no data, even with stage statistics");
+equal(color({method: "percentile", longterm: {status: "within", pct: 50}}), NODATA, "no flow at all is no data");
+mode = "date";
+equal(color(flowGage("within", 2, 50)), DATE_BINS[2][1], "and the stage mode still colors by the stage");
+
 mode = "trend";
 equal(color(withRate(0.5)), TREND[4][1], "trend mode colors by rate");
 equal(color(withRate(null)), NODATA, "no rate is no data in trend mode");
 
-for (const m of ["range", "trend", "date"]) {
+for (const m of ["range", "trend", "date", "flow"]) {
   mode = m;
   equal(color({method: "nws", category: "minor"}), NWS.minor[0], `NWS circles ignore ${m} mode`);
   equal(color({method: "nws", category: "normal"}), NWS.normal[0], `NWS normal ignores ${m} mode`);
@@ -75,7 +88,7 @@ for (const [name, bins] of [["RANGE", RANGE], ["DATE_BINS", DATE_BINS], ["TREND"
 }
 equal(RANGE.length, 5, "five range bins");
 equal(DATE_BINS.length, 6, "six percentile-for-this-date bins");
-equal(Object.keys(MODES).join(","), "range,trend,date", "the three color modes, in order");
+equal(Object.keys(MODES).join(","), "range,trend,date,flow", "the four color modes, in order");
 equal(TREND.length, 5, "five trend bins");
 for (const m of Object.values(MODES)) check(!m.legend.includes("<br>"), "legend heading is one line");
 
@@ -168,6 +181,25 @@ check(rowText(variants["long-term without years"]).includes("53 years;") &&
 check(popup(base).indexOf("7-day peak") < popup(base).indexOf("For Nov 5"), "the row follows the 7-day peak");
 check(popup(base).indexOf("For Nov 5") < popup(base).indexOf("Past year"), "and comes before the past-year row");
 check(popup({...forecastG, longterm: lt()}).includes("For Nov 5"), "circles get the row too");
+// the flow rows: only for a gage with a flow reading, in cubic feet per second
+const flowLt = over => ({pct: 97.7, status: "within", years: 95, first: null, last: null, month: 11, day: 5,
+                         median: 422, high: 2920, high_year: null, low: 36, low_year: null, ...over});
+check(!rowText(base).includes("Flow"), "no flow reading: no flow rows at all");
+check(rowText({...base, flow: 2400, flow_longterm: flowLt()}).includes(
+      "Flow 2,400 ft³/s Flow for Nov 5 98th percentile 95 years; median 422 ft³/s; record 2,920 ft³/s"),
+      "flow: the reading, its percentile, the median and the record");
+check(rowText({...base, flow: 30000, flow_longterm: flowLt({status: "above", pct: 100})}).includes(
+      "Flow 30,000 ft³/s Flow for Nov 5 Above the record (previous high 2,920 ft³/s)"), "a flood flow");
+check(rowText({...base, flow: 4150, flow_longterm: null}).includes("Flow 4,150 ft³/s Flow, this date no flow statistics"),
+      "a flow without statistics says so");
+check(popup({...base, flow: 2400, flow_longterm: flowLt()}).indexOf("For Nov 5") <
+      popup({...base, flow: 2400, flow_longterm: flowLt()}).indexOf("Flow for Nov 5"), "the flow rows follow the stage's");
+equal(cfs(4150), "4,150 ft³/s", "large flows: whole numbers with separators");
+equal(cfs(42.37), "42.4 ft³/s", "tens: one decimal");
+equal(cfs(3.456), "3.46 ft³/s", "small flows: two decimals");
+equal(cfs(-512.4), "-512 ft³/s", "a tide running upstream keeps its sign");
+for (const g of [{...base, flow: 2400, flow_longterm: flowLt()}, {...base, flow: 0, flow_longterm: null}])
+  check(!/undefined|NaN|Infinity|\[object|>null</.test(popup(g)), "a flow popup shows no bad value");
 // the forecast row says why there is no forecast when the page is for a past moment
 check(rowText({...forecastG, forecast: null}).includes("Forecast none issued"), "now: no forecast issued");
 AS_OF = "2026-11-03 12:00 UTC-05:00";
@@ -233,7 +265,7 @@ equal(trendBin(crestG({rate: 0.02}))[2].startsWith("Steady"), true, "bins: +0.02
 equal(trendBin(crestG({rate: 0.0201}))[2].startsWith("Rising"), true, "bins: +0.0201 is rising");
 
 // it changes the glyph, never the color
-for (const m of ["range", "trend", "date"]) {
+for (const m of ["range", "trend", "date", "flow"]) {
   mode = m;
   equal(color(crestG({}, 0.8)), color(crestG({}, 0)), `a cresting gage keeps its ${m}-mode color`);
 }

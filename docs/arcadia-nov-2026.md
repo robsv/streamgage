@@ -13,7 +13,7 @@ with the same colors, glyphs and legend as a map made today.
 
 Each frame is captioned with its moment, Arcadia's stage and category, and two counts across the river:
 gages above the record for the date, and gages rising fast. Colors, diamonds and glyphs are explained in the
-README's [legend sections](../README.md#diamond-colors-three-modes); in short, circles are colored by NWS
+README's [legend sections](../README.md#diamond-colors-four-modes); in short, circles are colored by NWS
 flood category, magenta diamonds are above the record for the date, and a wave marks a gage that is cresting.
 
 ## The climb starts
@@ -137,7 +137,7 @@ Bartow, and the Peace River near Homeland. This is the image the wave glyph was 
 </tr></table>
 
 For the colors and glyphs, see the README on the
-[percentile-for-this-date colors](../README.md#diamond-colors-three-modes) and the
+[percentile-for-this-date colors](../README.md#diamond-colors-four-modes) and the
 [trend glyphs, including the wave](../README.md#the-trend-glyph).
 
 ## How these frames were made

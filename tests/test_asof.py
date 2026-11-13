@@ -108,6 +108,7 @@ def river(monkeypatch):
         end = (as_of or datetime.now(timezone.utc)).timestamp()
         return {"02296750": readings(16.0, end, slope=0.05), "02294898": readings(74.5, end, slope=0.05)}
     monkeypatch.setattr(sg, "fetch_readings", fetch_readings)
+    monkeypatch.setattr(sg, "fetch_flows", lambda ids, as_of=None: {})  # no flow readings unless a test says so
     monkeypatch.setattr(sg, "fetch_time_zones", lambda ids: {site: ("EST", True) for site in ids})
     monkeypatch.setattr(sg, "fetch_histories", lambda ids, as_of=None: asked["history"].append((list(ids), as_of))
                         or {site: [float(i) for i in range(40)] for site in ids})

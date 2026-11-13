@@ -388,6 +388,36 @@ class TestFetchReadings:
             sg.fetch_readings(["02296750"])
 
 
+class TestFetchFlows:
+    def test_asks_for_the_last_three_days_of_flow(self, route):
+        calls = route({sg.CONTINUOUS_ITEMS: continuous_csv(("02296750", [(hours_ago(1), "4150")]))})
+        assert sg.fetch_flows(["02296750"])["02296750"][0][1] == 4150.0
+        _, params = calls[0]
+        assert params["parameter_code"] == "00060"
+        start, end = (datetime.fromisoformat(t) for t in params["datetime"].split("/"))
+        assert end - start == sg.STALE_AFTER
+
+    def test_a_backup_flow_series_is_told_apart_by_the_flow_catalog(self, route):
+        calls = route({sg.TIME_SERIES: {"features": []}, sg.CONTINUOUS_ITEMS: continuous_csv(
+            ("02296750", [(hours_ago(1), "4150")], "a"), ("02296750", [(hours_ago(1), "4100")], "b"))})
+        sg.fetch_flows(["02296750"])
+        assert [p["parameter_code"] for url, p in calls if url == sg.TIME_SERIES] == ["00060"]
+
+
+class TestFlowAt:
+    PTS = ((1000.0, 10.0), (4600.0, 20.0), (8200.0, 30.0))
+
+    def test_takes_the_closest_reading(self):
+        assert sg.flow_at(self.PTS, 5000.0) == 20.0
+
+    def test_a_reading_an_hour_away_still_counts_but_not_more(self):
+        assert sg.flow_at([(1000.0, 10.0)], 1000.0 + 3600) == 10.0
+        assert sg.flow_at([(1000.0, 10.0)], 1000.0 + 3601) is None
+
+    def test_no_readings(self):
+        assert sg.flow_at([], 1000.0) is None
+
+
 class TestLatestReadings:
     NOW = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc)
 

@@ -1,0 +1,98 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -81.87619456,
+     27.22088245
+    ]
+   },
+   "properties": {
+    "monitoring_location_id": "USGS-02296750",
+    "monitoring_location_name": "PEACE RIVER AT SR 70 AT ARCADIA, FL",
+    "site_type": "Stream",
+    "site_type_code": "ST",
+    "country_code": "US",
+    "state_code": "12",
+    "county_code": "027",
+    "data": [
+     {
+      "parameter_code": "00060",
+      "unit_of_measure": "ft^3/s",
+      "parent_time_series_id": "df736a7815e0470c98385a9e528c5f92",
+      "parent_statistic_id": "00003",
+      "parent_statistic_name": "Mean",
+      "values": [
+       {
+        "time_of_year": "11-05",
+        "time_of_year_type": "day_of_year",
+        "value": "603.917",
+        "sample_count": 95,
+        "approval_status": "approved",
+        "computation_id": "34bd2b5a-b979-4e3c-ac91-f143582c9efb",
+        "computation": "arithmetic_mean"
+       },
+       {
+        "time_of_year": "11-05",
+        "time_of_year_type": "day_of_year",
+        "value": "2920.0",
+        "sample_count": 95,
+        "approval_status": "approved",
+        "computation_id": "3f39461b-d4de-49dc-81e4-50db9453166a",
+        "computation": "maximum"
+       },
+       {
+        "time_of_year": "11-05",
+        "time_of_year_type": "day_of_year",
+        "value": "422.0",
+        "sample_count": 95,
+        "approval_status": "approved",
+        "computation_id": "bfc5cec3-fcf0-413a-aabc-9c18a6a39cc3",
+        "computation": "median"
+       },
+       {
+        "time_of_year": "11-05",
+        "time_of_year_type": "day_of_year",
+        "value": "36.0",
+        "sample_count": 95,
+        "approval_status": "approved",
+        "computation_id": "f9e36b5b-033a-4ce0-a141-1201167ac33c",
+        "computation": "minimum"
+       },
+       {
+        "time_of_year": "11-05",
+        "time_of_year_type": "day_of_year",
+        "values": [
+         "118.6",
+         "140.0",
+         "241.0",
+         "422.0",
+         "761.0",
+         "1464.0",
+         "1904.0"
+        ],
+        "percentiles": [
+         "5",
+         "10",
+         "25",
+         "50",
+         "75",
+         "90",
+         "95"
+        ],
+        "sample_count": 95,
+        "approval_status": "approved",
+        "computation_id": "21c6316c-5645-47a4-bdad-ff646c8cafdf",
+        "computation": "percentile"
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ],
+ "next": null
+}

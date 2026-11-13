@@ -23,7 +23,7 @@ python3 streamgage.py "Allegheny River" "Monongahela River" "Youghiogheny River"
 ## The map
 
 79 gages along the five rivers, with the same colors, diamonds and glyphs as a single-river map
-(see the README's [legend sections](../README.md#diamond-colors-three-modes)), and four purple rings
+(see the README's [legend sections](../README.md#diamond-colors-four-modes)), and four purple rings
 where the rivers meet. The rings are a layer you can switch off from the layers control at the
 top left, and the title panel counts them.
 

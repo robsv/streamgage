@@ -230,6 +230,7 @@ def river(monkeypatch):
     monkeypatch.setattr(sg, "fetch_readings", lambda ids, as_of=None: {"A0000001": [(when, 2.0)],
                                                                        "B0000002": [(when, 3.0)]})
     monkeypatch.setattr(sg, "fetch_time_zones", lambda ids: {})
+    monkeypatch.setattr(sg, "fetch_flows", lambda ids, as_of=None: {})  # no flow readings unless a test says so
     monkeypatch.setattr(sg, "fetch_histories", lambda ids, as_of=None: {})
     monkeypatch.setattr(sg, "fetch_nws", lambda *a: None)
     monkeypatch.setattr(sg, "fetch_daily_stats", lambda dates: {})

@@ -44,6 +44,7 @@ import requests
 NLDI = "https://api.water.usgs.gov/nldi/linked-data/nwissite"
 NWPS = "https://api.water.noaa.gov/nwps/v1/gauges"
 GAGE_HEIGHT = "00065"
+DISCHARGE = "00060"  # flow, in cubic feet per second
 DAILY_MAX, DAILY_MIN, DAILY_MEAN = "00001", "00002", "00003"  # USGS statistic codes
 MIN_HISTORY_DAYS = 30  # fewer daily values than this and there is no yearly percentile
 MIN_STAT_YEARS = 10  # fewer years of record than this and there is no long-term percentile
@@ -56,8 +57,8 @@ STAT_COLUMNS = (("min_va", 0), ("p05_va", 5), ("p10_va", 10), ("p20_va", 20), ("
                 ("max_va", 100))
 RETIRED_AFTER = timedelta(days=365)  # no data for this long: "retired" rather than "offline"
 CONTINUOUS = ("uv", "dv")  # catalog data types: real-time (15-minute) and daily values
-STAGE_OR_FLOW = (GAGE_HEIGHT, "00060")  # a "gage" here means stage or discharge, not just water quality
-PARAM_NAMES = {GAGE_HEIGHT: "stage", "00060": "discharge", "00010": "water temperature",
+STAGE_OR_FLOW = (GAGE_HEIGHT, DISCHARGE)  # a "gage" here means stage or discharge, not just water quality
+PARAM_NAMES = {GAGE_HEIGHT: "stage", DISCHARGE: "discharge", "00010": "water temperature",
                "00095": "specific conductance", "00300": "dissolved oxygen", "00400": "pH",
                "63680": "turbidity"}
 # the order and wording of the "not on the map" breakdown
@@ -82,6 +83,7 @@ ZONE_OFFSETS = {"AST": -4, "EST": -5, "CST": -6, "MST": -7, "PST": -8, "AKST": -
 NO_DATA = -999  # USGS and NWS report missing values as -999, -9999 or -999999
 MAX_SITES_PER_REQUEST = 100  # sites per request where nothing else sets the batch
 STALE_AFTER = timedelta(days=3)  # ignore gages whose latest stage reading is older than this
+FLOW_MATCH = timedelta(hours=1)  # a flow reading this close to the stage reading is the flow at that moment
 FLOOD_CATEGORIES = ("action", "minor", "moderate", "major")  # the ones the page knows how to color
 MATCH_RADIUS_KM = 0.5  # max distance between a USGS site and its NWS gauge
 CONFLUENCE_MERGE_KM = 0.5  # confluence points closer than this are one meeting of rivers
@@ -406,19 +408,32 @@ def site_of(row):
 
 
 def fetch_readings(site_ids, as_of=None):
-    """The last RECENT_DAYS of gage-height readings per site, as {site: [(epoch seconds, ft)]}, oldest
+    """The last RECENT_DAYS of gage-height readings per site, as {site: [(epoch seconds, ft)]} (see
+    fetch_values). A failed request is raised: without readings there is no map to draw."""
+    return fetch_values(site_ids, as_of, GAGE_HEIGHT, RECENT_DAYS)
+
+
+def fetch_flows(site_ids, as_of=None):
+    """Flow readings per site, as {site: [(epoch seconds, ft3/s)]}, over the STALE_AFTER days before
+    `as_of` or now, which covers any reading that counts as current (see fetch_values). A failed
+    request is raised."""
+    return fetch_values(site_ids, as_of, DISCHARGE, STALE_AFTER.days)
+
+
+def fetch_values(site_ids, as_of, parameter, days):
+    """The last `days` of readings of a parameter per site, as {site: [(epoch seconds, value)]}, oldest
     first. The days end at `as_of` (an aware datetime) when given, and now otherwise. Sites with no
     usable reading in those days are left out.
 
     Sites go READINGS_SITES_PER_REQUEST to a request (see fetch_csv). A site with more than one
-    gage-height series (a backup sensor, say) keeps the one series_rank puts first. A failed request
-    is raised: without readings there is no map to draw.
+    series of the parameter (a backup sensor, say) keeps the one series_rank puts first. A failed
+    request is raised.
     """
     end = as_of or datetime.now(timezone.utc)
-    window = (f"{(end - timedelta(days=RECENT_DAYS)).isoformat(timespec='minutes')}/"
+    window = (f"{(end - timedelta(days=days)).isoformat(timespec='minutes')}/"
               f"{end.isoformat(timespec='minutes')}")
     rows = fetch_csv(CONTINUOUS_ITEMS, site_ids, READINGS_SITES_PER_REQUEST,
-                     "monitoring_location_id,time_series_id,time,value", parameter_code=GAGE_HEIGHT, datetime=window)
+                     "monitoring_location_id,time_series_id,time,value", parameter_code=parameter, datetime=window)
     series = {}  # (site, series id) -> [(epoch seconds, ft)]
     for row in rows:
         stage = usable(row.get("value"))
@@ -434,7 +449,7 @@ def fetch_readings(site_ids, as_of=None):
     for site, ts in series:
         by_site.setdefault(site, []).append(ts)
     shared = sorted(site for site, ids in by_site.items() if len(ids) > 1)
-    kinds = fetch_series_kinds(shared) if shared else {}
+    kinds = fetch_series_kinds(shared, parameter) if shared else {}
     out = {}
     for site, ids in by_site.items():
         best = max(ids, key=lambda ts, site=site: series_rank(series[site, ts], kinds.get(ts)))
@@ -442,22 +457,22 @@ def fetch_readings(site_ids, as_of=None):
     return out
 
 
-def fetch_series_kinds(site_ids):
-    """{series id: (primary, description)} for the gage-height series at these sites, from the USGS
+def fetch_series_kinds(site_ids, parameter=GAGE_HEIGHT):
+    """{series id: (primary, description)} for a parameter's series at these sites, from the USGS
     series catalog. A failed request gives {}, said on stderr, and series_rank then goes by the
     readings alone."""
     kinds = {}
     try:
         for i in range(0, len(site_ids), MAX_SITES_PER_REQUEST):
             batch = site_ids[i:i + MAX_SITES_PER_REQUEST]
-            for f in get_json(TIME_SERIES, f="json", skipGeometry="true", limit=1000, parameter_code=GAGE_HEIGHT,
+            for f in get_json(TIME_SERIES, f="json", skipGeometry="true", limit=1000, parameter_code=parameter,
                               monitoring_location_id=",".join(f"USGS-{site}" for site in batch),
                               properties="id,primary,web_description")["features"]:
                 p = f["properties"]
                 kinds[p["id"]] = (p.get("primary") == "Primary", p.get("web_description"))
     except (requests.RequestException, KeyError, TypeError, ValueError):
-        say_missing(f"Sensor details unavailable for {gages_count(len(site_ids))} with more than one stage "
-                    "series; the newest series is used, which may be a backup sensor.")
+        say_missing(f"Sensor details unavailable for {gages_count(len(site_ids))} with more than one "
+                    f"{PARAM_NAMES[parameter]} series; the newest series is used, which may be a backup sensor.")
         return {}
     return kinds
 
@@ -474,6 +489,13 @@ def latest_readings(readings, as_of=None):
     older than STALE_AFTER, judged against `as_of` when given and now otherwise."""
     cutoff = ((as_of or datetime.now(timezone.utc)) - STALE_AFTER).timestamp()
     return {site: (pts[-1][1], pts[-1][0]) for site, pts in readings.items() if pts and pts[-1][0] >= cutoff}
+
+
+def flow_at(pts, when):
+    """The flow reading in `pts` ([(epoch seconds, ft3/s)], oldest first) closest to `when` (epoch
+    seconds) and no more than FLOW_MATCH from it, or None."""
+    near = [(abs(t - when), v) for t, v in pts if abs(t - when) <= FLOW_MATCH.total_seconds()]
+    return min(near)[1] if near else None
 
 
 def fetch_time_zones(site_ids):
@@ -619,7 +641,7 @@ def classify_site(rows, now=None):
     if gage:
         last = max(r["end_date"] for r in gage)
         first = min((r["begin_date"] for r in gage if r.get("begin_date")), default=last)
-        if any(r["parm_cd"] == "00060" and r["end_date"] >= (now - STALE_AFTER).date().isoformat()
+        if any(r["parm_cd"] == DISCHARGE and r["end_date"] >= (now - STALE_AFTER).date().isoformat()
                for r in gage):
             return "discharge_only", {}
         status = "retired" if last < (now - RETIRED_AFTER).date().isoformat() else "offline"
@@ -762,9 +784,10 @@ def reading_day(when):
     return d.month, d.day
 
 
-def fetch_daily_stats(dates):
-    """The statistics row for each site's own calendar day: {site: row}, shaped like a row of the legacy
-    USGS statistics service (see stat_row) for long_term.
+def fetch_daily_stats(dates, parameter=GAGE_HEIGHT):
+    """The statistics row of a parameter (gage height unless told otherwise) for each site's own
+    calendar day: {site: row}, shaped like a row of the legacy USGS statistics service (see stat_row)
+    for long_term.
 
     `dates` maps site -> (month, day). Sites on the same day go MAX_SITES_PER_REQUEST to a request,
     and the requests run in parallel. The service computes statistics from each kind of daily value
@@ -786,13 +809,13 @@ def fetch_daily_stats(dates):
         found, token = {}, None
         try:
             for _ in range(MAX_STAT_PAGES):
-                params = {"monitoring_location_id": [f"USGS-{site}" for site in batch], "parameter_code": GAGE_HEIGHT,
+                params = {"monitoring_location_id": [f"USGS-{site}" for site in batch], "parameter_code": parameter,
                           "normal_type": "DOY", "start_date": when, "end_date": when, "page_size": 1000}
                 data = get_json(STATISTICS, **params, **({"next_token": token} if token else {}))
                 for f in data["features"]:
                     site = site_of(f["properties"])
                     rows = [stat_row(s["values"], month, day) for s in f["properties"]["data"]
-                            if s.get("parameter_code") == GAGE_HEIGHT and s.get("parent_statistic_id") == DAILY_MEAN]
+                            if s.get("parameter_code") == parameter and s.get("parent_statistic_id") == DAILY_MEAN]
                     rows = [row for row in rows if row]
                     if rows and site in batch:  # only the sites asked about, whatever comes back
                         found[site] = max(rows, key=lambda row: int(row["count_nu"]))
@@ -809,8 +832,9 @@ def fetch_daily_stats(dates):
         for part in pool.map(fetch, jobs):
             found.update(part)
     if failed:
-        say_missing(f"Statistics for this date unavailable for {gages_count(len(failed))}; they have no percentile "
-                    "for this date. Run it again later for those.")
+        what = "Flow statistics" if parameter == DISCHARGE else "Statistics"
+        say_missing(f"{what} for this date unavailable for {gages_count(len(failed))}; they have no "
+                    f"{'flow ' if parameter == DISCHARGE else ''}percentile for this date. Run it again later for those.")
     return found
 
 
@@ -841,8 +865,9 @@ def stat_row(values, month, day):
     return row
 
 
-def long_term(stage, row):
-    """Where a stage falls among the same calendar day's values in every year of record.
+def long_term(stage, row, log=False):
+    """Where a stage (or, with `log`, a flow) falls among the same calendar day's values in every year
+    of record.
 
     `row` is a statistics row (see fetch_daily_stats). The service gives only a few percentile points
     (5th, 10th, 20th, 25th, 50th, 75th, 80th, 90th and 95th, plus the minimum and maximum), so the
@@ -850,6 +875,11 @@ def long_term(stage, row):
     shorter than MIN_STAT_YEARS or the minimum or maximum is missing. Otherwise a dict whose "status"
     is "within", "above" (higher than every past value, percentile 100) or "below" (lower than every
     one, percentile 0), with the span of the record and its median and extremes for display.
+
+    Flow is skewed: the record can be ten times the 95th percentile. So with `log`, a value between two
+    points is placed on a log scale; a straight line would rank a high flow too low, since most of the
+    span between two upper points is rarely reached. Where the lower point or the value is zero or less
+    (a dry bed, or a tide running upstream), it falls back to a straight line.
     """
     try:
         years = int(row["count_nu"])
@@ -873,7 +903,10 @@ def long_term(stage, row):
         else:
             v0, p0 = [a for a in anchors if a[0] < stage][-1]
             v1, p1 = next(a for a in anchors if a[0] > stage)
-            pct = p0 + (p1 - p0) * (stage - v0) / (v1 - v0)
+            if log and v0 > 0:
+                pct = p0 + (p1 - p0) * math.log(stage / v0) / math.log(v1 / v0)
+            else:
+                pct = p0 + (p1 - p0) * (stage - v0) / (v1 - v0)
 
     def year(col):
         text = row.get(col, "").strip()
@@ -999,6 +1032,15 @@ def build_gages(anchor, distance_km, draw_retired=False, as_of=None, paths=None,
             nws_state["down"] = True
 
     stats = fetch_daily_stats({site: reading_day(when) for site, (_, when) in current.items()})
+    try:  # the flow at the moment of each stage reading, for the flow percentile; only the last few days are needed
+        flow_pts = fetch_flows(list(current), as_of)
+    except requests.RequestException:
+        flow_pts = {}
+        say_missing(f"Flow readings unavailable for {gages_count(len(current))}; they have no flow percentile "
+                    "for this date. Run it again later for those.")
+    flows = {site: flow for site, pts in flow_pts.items()
+             if site in latest and (flow := flow_at(pts, latest[site][1])) is not None}
+    flow_stats = fetch_daily_stats({site: reading_day(current[site][1]) for site in flows}, DISCHARGE) if flows else {}
 
     def build(site):
         name, lat, lon = sites[site]
@@ -1006,7 +1048,9 @@ def build_gages(anchor, distance_km, draw_retired=False, as_of=None, paths=None,
         gage = {"site": site, "name": pretty_name(name), "lat": lat,
                 "lon": lon, "stage": stage, "time": when,
                 "recent": recent_stats(readings[site], now=as_of.timestamp() if as_of else None),
-                "longterm": long_term(stage, stats[site]) if site in stats else None}
+                "longterm": long_term(stage, stats[site]) if site in stats else None,
+                "flow": flows.get(site),
+                "flow_longterm": long_term(flows[site], flow_stats[site], log=True) if site in flow_stats else None}
         try:
             flood = fetch_nws(site, lat, lon, nws)
         except requests.RequestException:
@@ -1216,6 +1260,8 @@ const MODES = {
   trend: {label: "Trend (last 6 h)", legend: "No NWS stages: trend over last 6 h", bins: TREND},
   date:  {label: "Percentile for this date (all years)", legend: "No NWS stages: percentile for this date",
           bins: DATE_BINS},
+  flow:  {label: "Flow percentile for this date (all years)", legend: "No NWS stages: flow percentile for this date",
+          bins: DATE_BINS},
 };
 const NODATA = "#999999";
 let mode = "range";
@@ -1229,13 +1275,15 @@ const trendBin = g => {
 };
 // round once, so the number shown in a popup and the color bin it falls in always agree
 const rounded = v => v == null ? null : Math.round(v);
-function dateValue(g) {
-  const lt = g.longterm;
+// the percentile for this date as binned: of the stage, or with "flow_longterm" of the flow
+function dateValue(g, key = "longterm") {
+  const lt = g[key];
   return !lt ? null : lt.status === "above" ? 101 : Math.round(lt.pct);
 }
 function binFor(g) {
-  return mode === "trend" ? trendBin(g)
-       : bin(MODES[mode].bins, mode === "range" ? rounded(g.recent && g.recent.range_pos) : dateValue(g));
+  if (mode === "trend") return trendBin(g);
+  if (mode === "range") return bin(RANGE, rounded(g.recent && g.recent.range_pos));
+  return bin(DATE_BINS, dateValue(g, mode === "flow" ? "flow_longterm" : "longterm"));
 }
 function color(g) {
   if (g.method === "nws") return NWS[g.category][0];
@@ -1362,26 +1410,38 @@ function recentRows(g) {
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-function longTermRow(g) {
-  const lt = g.longterm;
-  if (!lt) return `<tr><td>This date</td><td>no long-term statistics</td></tr>`;
+const feet = v => `${v.toFixed(2)} ft`;
+// flow in cubic feet per second: whole numbers with separators from 100 up, more digits below
+const cfs = v => (Math.abs(v) >= 100 ? Math.round(v).toLocaleString("en-US")
+                  : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2)) + " ft³/s";
+// `what` names the quantity in the row's label: "" for the stage, "Flow" for the flow
+function dateRow(lt, what, fmt, none) {
+  if (!lt) return `<tr><td>${what ? what + ", this date" : "This date"}</td><td>${none}</td></tr>`;
   const inYear = y => y ? ` in ${y}` : "";
   const sub = [`${lt.years} years` + (lt.first && lt.last ? `, ${lt.first}-${lt.last}` : "")];
-  if (lt.median != null) sub.push(`median ${lt.median.toFixed(2)} ft`);
+  if (lt.median != null) sub.push(`median ${fmt(lt.median)}`);
   let head;
-  if (lt.status === "above") head = `<b>Above the record</b> (previous high ${lt.high.toFixed(2)} ft${inYear(lt.high_year)})`;
-  else if (lt.status === "below") head = `<b>Below the record low</b> (previous low ${lt.low.toFixed(2)} ft${inYear(lt.low_year)})`;
+  if (lt.status === "above") head = `<b>Above the record</b> (previous high ${fmt(lt.high)}${inYear(lt.high_year)})`;
+  else if (lt.status === "below") head = `<b>Below the record low</b> (previous low ${fmt(lt.low)}${inYear(lt.low_year)})`;
   else {
     head = `<b>${ordinal(Math.round(lt.pct))} percentile</b>`;
-    sub.push(`record ${lt.high.toFixed(2)} ft${lt.high_year ? ` (${lt.high_year})` : ""}`);
+    sub.push(`record ${fmt(lt.high)}${lt.high_year ? ` (${lt.high_year})` : ""}`);
   }
-  return `<tr><td>For ${MONTHS[lt.month - 1]} ${lt.day}</td><td>${head}<br><span class="sub">${sub.join("; ")}</span></td></tr>`;
+  const day = `${MONTHS[lt.month - 1]} ${lt.day}`;
+  return `<tr><td>${what ? `${what} for ${day}` : `For ${day}`}</td><td>${head}<br><span class="sub">${sub.join("; ")}</span></td></tr>`;
+}
+const longTermRow = g => dateRow(g.longterm, "", feet, "no long-term statistics");
+// a gage with no flow reading has no flow rows at all, rather than a "no data" line in every popup
+function flowRows(g) {
+  if (g.flow == null) return "";
+  return `<tr><td>Flow</td><td><b>${cfs(g.flow)}</b></td></tr>` +
+         dateRow(g.flow_longterm, "Flow", cfs, "no flow statistics");
 }
 
 function popup(g) {
   const t = new Date(g.time).toLocaleString();
   let rows = `<tr><td>Stage</td><td><b>${g.stage.toFixed(2)} ft</b></td></tr>
-              <tr><td>Reported</td><td>${t}</td></tr>` + recentRows(g) + longTermRow(g);
+              <tr><td>Reported</td><td>${t}</td></tr>` + recentRows(g) + longTermRow(g) + flowRows(g);
   if (g.method === "nws") {
     rows += `<tr><td>NWS category</td><td><b>${NWS[g.category][1]}</b></td></tr>`;
     for (const c of ["action", "minor", "moderate", "major"])
